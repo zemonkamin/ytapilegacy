@@ -1,3 +1,29 @@
+EN
+# YouTube for Windows 10 mobile
+## The server part
+
+This code can be used to obtain some data from either invidious or yt-dlp, and the method of obtaining data from Google servers using Apikey is also used.
+The invidious method does not involve interaction with the invidious api, workarounds are used.
+
+
+### Implemented:
+- categories
+- videos from categories
+- recommendations
+- video search
+- getting video data
+- getting a direct link to the video
+
+## Installation
+1. Installation using invidious involves downloading files from the repository to the host and configuring in config.php
+2. Installation using non-vs, requires the installation of Python and non-vs using pip install on the host, and then everything is as in the 1st paragraph
+
+# The code will be updated
+It is planned to log in to the account and receive personal recommendations, as well as subscriptions.
+
+## The code is written and designed by Zemonkamin
+
+RU
 # YouTube для Windows 10 mobile
 ## Серверная часть
 
