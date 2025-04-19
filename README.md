@@ -1,5 +1,9 @@
+<div align="center">
+<img src="icon.png" width=20% height=20%>
+<h1>YouTube Windows 10 mobile</h1>
+</div>
+
 EN
-# YouTube for Windows 10 mobile
 ## The server part
 
 This code can be used to obtain some data from either invidious or yt-dlp, and the method of obtaining data from Google servers using Apikey is also used.
@@ -24,7 +28,6 @@ It is planned to log in to the account and receive personal recommendations, as 
 ## The code is written and designed by Zemonkamin
 
 RU
-# YouTube для Windows 10 mobile
 ## Серверная часть
 
 Данный код может использовать для получения некоторых данных либо invidious, либо yt-dlp, также используется метод получения данных с серверов Google посредством Apikey.
