@@ -9,6 +9,9 @@ $config = array(
     // Ссылка на Invidious
     'invidious_url' => 'inv1.nadeko.net',
 
+    // Ссылка на oldyoutube
+    'oldyoutube_url' => 'http://sonyericsson.org:64',
+
     // Ссылка на хост
     'url' => 'https://qqq.bccst.ru/youtube',
 
@@ -38,14 +41,17 @@ $config = array(
     
     // Максимальное количество популярных видео
     'max_popular_videos' => 10,
+	
+	// Таймер на загрузку прямой ссылки видео
+    'video_timer' => 10,
     
     // Настройки прокси
     'use_thumbnail_proxy' => true,          // Использовать прокси для превью видео
     'use_channel_thumbnail_proxy' => true,  // Использовать прокси для иконок каналов
-    'use_video_proxy' => true,              // Использовать прокси для видео
+    'use_video_proxy' => false,              // Использовать прокси для видео
     
     // Метод получения видео
-    'video_source' => 'invidious',          // 'invidious' - использовать Invidious, 'direct' - использовать прямые ссылки через Python-скрипт
+    'video_source' => 'oldyoutube',          // 'invidious' - использовать Invidious, 'direct' - использовать прямые ссылки через Python-скрипт, 'oldyoutube' - использование oldyoutube layout
     
     // Путь к Python в виртуальном окружении (используется только при video_source = 'direct')
     'python_path' => 'topvenv/bin/python'
