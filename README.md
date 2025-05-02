@@ -51,6 +51,6 @@ RU
 
 Screenshots:
 
-<img src="screenshots/yt1.jpg" width=40%>
+<img src="screenshots/yt1.jpg" width=40%><img src="screenshots/yt2.jpg" width=40%>
 
 ## Код написан и спроектирован Zemonkamin
