@@ -13,7 +13,7 @@ $config = array(
     'oldyoutube_url' => 'http://sonyericsson.org:64',
 
     // Ссылка на хост
-    'url' => 'https://qqq.bccst.ru/youtube',
+    'url' => 'https://qqq.bccst.ru/youtube/',
 
     // Качество видео по умолчанию
     'default_quality' => '360',
@@ -43,15 +43,15 @@ $config = array(
     'max_popular_videos' => 10,
 	
 	// Таймер на загрузку прямой ссылки видео
-    'video_timer' => 10,
+    'video_timer' => 30,
     
     // Настройки прокси
     'use_thumbnail_proxy' => true,          // Использовать прокси для превью видео
     'use_channel_thumbnail_proxy' => true,  // Использовать прокси для иконок каналов
-    'use_video_proxy' => false,              // Использовать прокси для видео
+    'use_video_proxy' => true,              // Использовать прокси для видео
     
     // Метод получения видео
-    'video_source' => 'oldyoutube',          // 'invidious' - использовать Invidious, 'direct' - использовать прямые ссылки через Python-скрипт, 'oldyoutube' - использование oldyoutube layout
+    'video_source' => 'direct',          // 'invidious' - использовать Invidious, 'direct' - использовать прямые ссылки через Python-скрипт, 'oldyoutube' - использование oldyoutube layout
     
     // Путь к Python в виртуальном окружении (используется только при video_source = 'direct')
     'python_path' => 'topvenv/bin/python'
