@@ -4,47 +4,47 @@
 </div>
 <a href="https://discord.gg/KUTcABsCrX">Discord</a>
 
-Идет поиск людей, которые могли бы помочь с развитием проекта.
+We are looking for people who could help with the development of the project.
 
-Инстанты:
-- <a href="https://legacyprojects.ru/youtube/">LegacyProjects</a>
+Instances:
+- <a href="https://legacyprojects.ru/youtube /">LegacyProjects</a>
 - <a href="https://qqq.bccst.ru/youtube/">qqq.bccst.ru</a>
 
 <hr>
 
-### Реализовано:
-- категории
-- видео из категорий
-- рекомендации
-- поиск видео
-- получение данных о видео
-- получение прямой ссылки на видео
-- Видео от определенного человека
-- Получение информации о авторе видео
-- Комментарии
-- Предложения для поиска
+### Implemented:
+- categories
+- videos from categories
+- recommendations
+- video search
+- getting video data
+- getting a direct link to the video
+- Video from a certain person
+- Getting information about the author of the video
+- Comments
+- Search suggestions
 
 <hr>
 
-## Установка
-Установка предполагает загрузку файлов с репозитория на хост и настройка в config.php.
-## Настройка config.php
-- обязательно замените значение url на ваш путь к api
-- по желанию введите общий youtube_api_key
-- настройте прокси по своему желанию (48 строка)
-- по желанию введите invidious_url и oldyoutube_url
+## Installation
+Installation involves downloading files from the repository to the host and configuring in config.php .
+## Setting up config.php
+- be sure to replace the url value with your api path.
+- optionally enter the general youtube_api_key
+- configure the proxy as desired (line 48)
+- optionally enter invidious_url and oldyoutube_url
 
 <hr>
 
-# Код будет обновляться
-Планируется реализация входа в аккаунт и получение персональных рекомендаций, а также подписок.
+# The code will be updated
+It is planned to log in to the account and receive personal recommendations, as well as subscriptions.
 
 <hr>
 
-Скриншоты клиента использующего данное API:
+Screenshots of the client using this API:
 
 <img src="screenshots/yt1.jpg" width=40%><img src="screenshots/yt2.jpg" width=40%>
 <br>
 <img src="screenshots/yt3.jpg" width=40%><img src="screenshots/yt4.jpg" width=40%>
 
-## Код написан и спроектирован Zemonkamin
+## The code is written and designed by Zemonkamin
