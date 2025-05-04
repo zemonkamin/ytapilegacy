@@ -1,5 +1,5 @@
 <div align="center">
-<img src="icon.png" width=20% height=20%>
+<img src="iconytapilegacy.png" width=20% height=20%>
 <h1>YouTube API Legacy</h1>
 </div>
 <a href="https://discord.gg/KUTcABsCrX">Discord</a>
