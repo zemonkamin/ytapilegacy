@@ -10,6 +10,7 @@ const port = 2823;
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(express.static('public'));
 
 // Configuration
 const config = {
@@ -549,6 +550,151 @@ app.get('/get-ytvideo-info.php', async (req, res) => {
         console.error('Error in get-ytvideo-info:', error);
         res.json({ error: 'Internal server error' });
     }
+});
+
+// Home page route
+app.get('/', (req, res) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>YouTube Legacy API</title>
+            <style>
+                body {
+                    margin: 0;
+                    padding: 0;
+                    font-family: 'Segoe UI', sans-serif;
+                    background: #1a1a1a;
+                    color: #fff;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                    min-height: 100vh;
+                }
+                .container {
+                    text-align: center;
+                    padding: 20px;
+                    max-width: 800px;
+                }
+                .icon {
+                    width: 150px;
+                    height: 150px;
+                    margin-bottom: 20px;
+                }
+                h1 {
+                    font-size: 2.5em;
+                    margin: 0;
+                    color: #fff;
+                }
+                .subtitle {
+                    font-size: 1.2em;
+                    color: #888;
+                    margin: 10px 0 30px;
+                }
+                .tile {
+                    background: #2d2d2d;
+                    border-radius: 10px;
+                    padding: 20px;
+                    margin: 10px 0;
+                    text-align: left;
+                }
+                .tile h2 {
+                    margin: 0 0 10px;
+                    color: #fff;
+                }
+                .tile p {
+                    margin: 0;
+                    color: #888;
+                }
+                .endpoints {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                    gap: 20px;
+                    margin-top: 30px;
+                }
+                .endpoint {
+                    background: #333;
+                    padding: 15px;
+                    border-radius: 8px;
+                    transition: transform 0.2s;
+                }
+                .endpoint:hover {
+                    transform: translateY(-5px);
+                }
+                .endpoint h3 {
+                    margin: 0 0 10px;
+                    color: #fff;
+                }
+                .endpoint p {
+                    margin: 0;
+                    color: #888;
+                    font-size: 0.9em;
+                }
+                .footer {
+                    margin-top: 40px;
+                    color: #666;
+                    font-size: 0.9em;
+                }
+                .legacy-badge {
+                    background: #0078D7;
+                    color: white;
+                    padding: 5px 10px;
+                    border-radius: 4px;
+                    font-size: 0.8em;
+                    margin-left: 10px;
+                    vertical-align: middle;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <img src="https://github.com/zemonkamin/ytapilegacy/raw/main/icon.png" alt="YouTube Legacy API" class="icon">
+                <h1>YouTube Legacy API <span class="legacy-badge">LegacyProjects</span></h1>
+                <div class="subtitle">A Windows Phone inspired YouTube API service</div>
+                
+                <div class="tile">
+                    <h2>About</h2>
+                    <p>This is a legacy YouTube API service that provides endpoints for fetching video information, channel data, and more. Built with Node.js and Express.</p>
+                    <p style="margin-top: 10px;">Part of the LegacyProjects initiative, bringing back the classic YouTube experience.</p>
+                </div>
+
+                <div class="endpoints">
+                    <div class="endpoint">
+                        <h3>Video Information</h3>
+                        <p>/get-ytvideo-info.php</p>
+                    </div>
+                    <div class="endpoint">
+                        <h3>Channel Videos</h3>
+                        <p>/get_author_videos.php</p>
+                    </div>
+                    <div class="endpoint">
+                        <h3>Search Videos</h3>
+                        <p>/get_search_videos.php</p>
+                    </div>
+                    <div class="endpoint">
+                        <h3>Top Videos</h3>
+                        <p>/get_top_videos.php</p>
+                    </div>
+                    <div class="endpoint">
+                        <h3>Categories</h3>
+                        <p>/get-categories.php</p>
+                    </div>
+                    <div class="endpoint">
+                        <h3>Related Videos</h3>
+                        <p>/get_related_videos.php</p>
+                    </div>
+                </div>
+
+                <div class="footer">
+                    Running on port ${port} | LegacyProjects YouTube API Service
+                </div>
+            </div>
+        </body>
+        </html>
+    `);
 });
 
 // Start server
