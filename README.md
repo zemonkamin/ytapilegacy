@@ -3,6 +3,7 @@
 <h1>YouTube API Legacy</h1>
 </div>
 <a href="https://discord.gg/KUTcABsCrX">Discord</a>
+<a href="https://github.com/zemonkamin/ytapilegacy/blob/main/yt.js">JS Version</a>
 
 We are looking for people who could help with the development of the project.
 
