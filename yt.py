@@ -12,6 +12,9 @@ from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 import googleapiclient.discovery
 import uuid
+import subprocess
+import threading
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -46,6 +49,24 @@ def save_tokens():
         json.dump(saved_tokens, f)
 
 # Helper functions
+
+# Streaming activity tracking for auto-restart
+active_streams_lock = threading.Lock()
+active_streams = 0
+last_stream_activity = time.time()
+
+def mark_stream_start():
+    global active_streams, last_stream_activity
+    with active_streams_lock:
+        active_streams += 1
+        last_stream_activity = time.time()
+
+def mark_stream_end():
+    global active_streams, last_stream_activity
+    with active_streams_lock:
+        if active_streams > 0:
+            active_streams -= 1
+        last_stream_activity = time.time()
 
 def get_channel_thumbnail(channel_id, api_key):
     if not config['fetch_channel_thumbnails']:
@@ -832,12 +853,283 @@ def get_direct_video_url_api():
         print('Error in get-direct-video-url:', e)
         return jsonify({'error': 'Internal server error'})
 
-@app.route('/direct_url', methods=['GET'])
+@app.route('/direct_url', methods=['GET', 'HEAD'])
 def direct_url():
     try:
         video_id = request.args.get('video_id')
+        quality = request.args.get('quality')
         if not video_id:
             return jsonify({'error': 'ID видео не был передан.'}), 400
+
+        # Fetch video duration upfront using yt_dlp
+        duration_value = None
+        try:
+            ydl_opts_info = {'quiet': True, 'no_warnings': True}
+            if config.get('use_cookies', True):
+                ydl_opts_info['cookiefile'] = 'cookies.txt'
+            with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                duration_value = info.get('duration')
+        except Exception as e:
+            print(f"Error fetching duration for video_id {video_id}: {e}")
+
+        # If a quality is provided, combine video+audio using FFmpeg
+        if quality:
+            try:
+                def parse_desired_height(qval):
+                    if not qval:
+                        return None
+                    s = str(qval).strip().lower()
+                    try:
+                        return int(s)
+                    except Exception:
+                        pass
+                    digits = ''.join(ch for ch in s if ch.isdigit())
+                    if digits:
+                        try:
+                            return int(digits)
+                        except Exception:
+                            pass
+                    aliases = {
+                        'tiny': 144, 'small': 240, 'medium': 360, 'large': 480,
+                        'hd': 720, 'hd720': 720, '720p': 720,
+                        'hd1080': 1080, '1080p': 1080,
+                        '144p': 144, '240p': 240, '360p': 360, '480p': 480,
+                        '2160p': 2160, '1440p': 1440
+                    }
+                    return aliases.get(s)
+
+                desired_height = parse_desired_height(quality)
+
+                ydl_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'format': f'bestvideo[height<={desired_height}]+bestaudio/best[height<={desired_height}]' if desired_height else 'best',
+                }
+                if config.get('use_cookies', True):
+                    ydl_opts['cookiefile'] = 'cookies.txt'
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+                    formats = info.get('formats', [])
+
+                    # Try to use a progressive (audio+video) stream first
+                    progressive_candidates = [
+                        f for f in formats
+                        if (f.get('vcodec') and f.get('vcodec') != 'none') and (f.get('acodec') and f.get('acodec') != 'none')
+                    ]
+                    def score_progressive(f):
+                        height = f.get('height') or 0
+                        ext_score = 1 if f.get('ext') == 'mp4' else 0
+                        return (height, ext_score)
+                    selected_progressive = None
+                    if progressive_candidates:
+                        if desired_height is not None:
+                            exact_p = [f for f in progressive_candidates if f.get('height') == desired_height]
+                            exact_p.sort(key=score_progressive, reverse=True)
+                            if exact_p:
+                                selected_progressive = exact_p[0]
+                            else:
+                                selected_progressive = None  # Force FFmpeg mux path
+                        else:
+                            progressive_candidates.sort(key=score_progressive, reverse=True)
+                            selected_progressive = progressive_candidates[0]
+
+                    if selected_progressive and selected_progressive.get('url'):
+                        prog_url = selected_progressive['url']
+                        headers = {
+                            'Range': request.headers.get('Range', 'bytes=0-'),
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                        }
+                        resp = requests.get(prog_url, headers=headers, stream=True, timeout=config['request_timeout'])
+                        def generate_prog():
+                            mark_stream_start()
+                            try:
+                                for chunk in resp.iter_content(chunk_size=8192):
+                                    if chunk:
+                                        yield chunk
+                            finally:
+                                mark_stream_end()
+                        response = Response(None if request.method == 'HEAD' else generate_prog(), status=resp.status_code)
+                        response.headers['Content-Type'] = resp.headers.get('content-type', 'video/mp4')
+                        response.headers['Content-Length'] = resp.headers.get('content-length', '')
+                        response.headers['Accept-Ranges'] = 'bytes'
+                        if 'content-range' in resp.headers:
+                            response.headers['Content-Range'] = resp.headers['content-range']
+                        if duration_value:
+                            duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
+                            response.headers['X-Content-Duration'] = duration_str
+                            response.headers['Content-Duration'] = duration_str
+                            response.headers['X-Video-Duration'] = duration_str
+                            response.headers['X-Duration-Seconds'] = duration_str
+                        return response
+
+                    # Select video-only stream
+                    video_candidates = [
+                        f for f in formats
+                        if f.get('vcodec') and f.get('vcodec') != 'none' and (f.get('acodec') in (None, 'none'))
+                    ]
+                    def score_video(f):
+                        height = f.get('height') or 0
+                        ext_score = 1 if f.get('ext') == 'mp4' else 0
+                        return (height, ext_score)
+
+                    selected_video = None
+                    if desired_height:
+                        exact = [f for f in video_candidates if f.get('height') == desired_height]
+                        exact.sort(key=score_video, reverse=True)
+                        if exact:
+                            selected_video = exact[0]
+                        else:
+                            lower = [f for f in video_candidates if (f.get('height') or 0) <= desired_height]
+                            lower.sort(key=score_video, reverse=True)
+                            if lower:
+                                selected_video = lower[0]
+                    if not selected_video and video_candidates:
+                        video_candidates.sort(key=score_video, reverse=True)
+                        selected_video = video_candidates[0]
+
+                    # Select audio-only stream
+                    audio_candidates = [
+                        f for f in formats
+                        if f.get('acodec') and f.get('acodec') != 'none' and (f.get('vcodec') in (None, 'none'))
+                    ]
+
+                    def normalize_lang(lang_value):
+                        if not lang_value:
+                            return ''
+                        lang = str(lang_value).strip().lower()
+                        if lang in ('eng', 'en-us', 'en-gb', 'en_usa', 'english'):
+                            return 'en'
+                        if lang in ('rus', 'ru-ru', 'ru_ru', 'russian'):
+                            return 'ru'
+                        if lang.startswith('en'):
+                            return 'en'
+                        if lang.startswith('ru'):
+                            return 'ru'
+                        return lang
+
+                    def get_lang_from_format(fmt):
+                        for key in ('language', 'lang', 'language_code', 'audio_lang'):
+                            if key in fmt and fmt.get(key):
+                                return normalize_lang(fmt.get(key))
+                        return ''
+
+                    def score_audio(f):
+                        abr = f.get('abr') or 0
+                        ext_score = 1 if f.get('ext') in ('m4a', 'mp4') else 0
+                        return (ext_score, abr)
+
+                    selected_audio = None
+                    if audio_candidates:
+                        en_list = [f for f in audio_candidates if get_lang_from_format(f) == 'en']
+                        ru_list = [f for f in audio_candidates if get_lang_from_format(f) == 'ru']
+                        other_list = [f for f in audio_candidates if get_lang_from_format(f) not in ('en', 'ru')]
+                        for lst in (en_list, ru_list, other_list):
+                            if lst:
+                                lst.sort(key=score_audio, reverse=True)
+                                selected_audio = lst[0]
+                                break
+
+                    if not selected_video or not selected_audio:
+                        return jsonify({'error': 'Не удалось подобрать видео/аудио потоки для заданного качества.'}), 500
+
+                    video_url = selected_video.get('url')
+                    audio_url = selected_audio.get('url')
+                    if not video_url or not audio_url:
+                        return jsonify({'error': 'Не удалось получить ссылки на потоки.'}), 500
+
+                    # Build FFmpeg command to mux and stream fragmented MP4
+                    # If only headers requested, avoid spawning FFmpeg
+                    if request.method == 'HEAD':
+                        response = Response(None, mimetype='video/mp4')
+                        if duration_value:
+                            duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
+                            response.headers['X-Content-Duration'] = duration_str
+                            response.headers['Content-Duration'] = duration_str
+                            response.headers['X-Video-Duration'] = duration_str
+                            response.headers['X-Duration-Seconds'] = duration_str
+                        return response
+
+                    user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36'
+                    common_headers = 'Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com'
+                    ffmpeg_cmd = [
+                        'ffmpeg',
+                        '-hide_banner',
+                        '-loglevel', 'error',
+                        '-nostdin',
+                        # Reconnect options for HTTP inputs
+                        '-reconnect', '1',
+                        '-reconnect_streamed', '1',
+                        '-reconnect_at_eof', '1',
+                        '-reconnect_delay_max', '10',
+                        # Input 0 (video)
+                        '-user_agent', user_agent,
+                        '-headers', common_headers,
+                        '-i', video_url,
+                        # Input 1 (audio)
+                        '-user_agent', user_agent,
+                        '-headers', common_headers,
+                        '-i', audio_url,
+                        # Mapping
+                        '-map', '0:v:0',
+                        '-map', '1:a:0',
+                        # Codecs
+                        '-c:v', 'copy',
+                        '-c:a', 'aac',
+                        '-b:a', '160k',
+                        # Container/streaming flags
+                        '-movflags', 'frag_keyframe+empty_moov',
+                        '-f', 'mp4',
+                        '-'
+                    ]
+
+                    ffmpeg_process = subprocess.Popen(
+                        ffmpeg_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        bufsize=0
+                    )
+
+                    def _drain_stderr():
+                        try:
+                            while True:
+                                line = ffmpeg_process.stderr.readline()
+                                if not line:
+                                    break
+                        except Exception:
+                            pass
+                    threading.Thread(target=_drain_stderr, daemon=True).start()
+
+                    def generate():
+                        mark_stream_start()
+                        try:
+                            while True:
+                                chunk = ffmpeg_process.stdout.read(65536)
+                                if not chunk:
+                                    break
+                                yield chunk
+                        finally:
+                            try:
+                                ffmpeg_process.terminate()
+                            except Exception:
+                                pass
+                            mark_stream_end()
+
+                    response = Response(generate(), mimetype='video/mp4')
+                    if duration_value:
+                        duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
+                        response.headers['X-Content-Duration'] = duration_str
+                        response.headers['Content-Duration'] = duration_str
+                        response.headers['X-Video-Duration'] = duration_str
+                        response.headers['X-Duration-Seconds'] = duration_str
+                    return response
+
+            except Exception as e:
+                print('Error in direct_url (ffmpeg mux):', e)
+                return jsonify({'error': 'Internal server error'}), 500
+
+        # Fallback: proxy a single direct URL (progressive)
         video_url = get_direct_video_url(video_id)
         if not video_url:
             return jsonify({'error': 'Не удалось получить прямую ссылку на видео.'}), 500
@@ -847,15 +1139,25 @@ def direct_url():
         }
         resp = requests.get(video_url, headers=headers, stream=True, timeout=config['request_timeout'])
         def generate():
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    yield chunk
+            mark_stream_start()
+            try:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
+            finally:
+                mark_stream_end()
         response = Response(generate(), status=resp.status_code)
-        response.headers['Content-Type'] = resp.headers.get('content-type', 'application/octet-stream')
+        response.headers['Content-Type'] = resp.headers.get('content-type', 'video/mp4')
         response.headers['Content-Length'] = resp.headers.get('content-length', '')
         response.headers['Accept-Ranges'] = 'bytes'
         if 'content-range' in resp.headers:
             response.headers['Content-Range'] = resp.headers['content-range']
+        if duration_value:
+            duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
+            response.headers['X-Content-Duration'] = duration_str
+            response.headers['Content-Duration'] = duration_str
+            response.headers['X-Video-Duration'] = duration_str
+            response.headers['X-Duration-Seconds'] = duration_str
         return response
     except Exception as e:
         print('Error in direct_url:', e)
@@ -887,12 +1189,14 @@ def embed():
             published_at = f"{published_at[6:8]}.{published_at[4:6]}.{published_at[0:4]}"
         else:
             published_at = ''
-        # Форматируем длительность
+        # Форматируем длительность и готовим числовое значение для встраивания в JS
         duration = video_info['duration']
         if duration:
             duration_str = str(timedelta(seconds=duration))
+            duration_seconds = int(duration)
         else:
             duration_str = ''
+            duration_seconds = 0
         return '''
         <!DOCTYPE html>
         <html lang="ru">
@@ -1127,6 +1431,7 @@ def embed():
                 const timeLabel = document.getElementById('timeLabel');
                 const titleBar = document.getElementById('titleBar');
                 let hideUITimeout = null;
+                const TOTAL_DURATION = {duration_seconds};
                 function formatTime(sec) {{
                     if (isNaN(sec) || sec === Infinity) return '0:00';
                     sec = Math.floor(sec);
@@ -1144,10 +1449,10 @@ def embed():
                     }}
                 }}
                 function updateTime() {{
-                    timeLabel.textContent = `${{formatTime(video.currentTime)}} / ${{formatTime(video.duration)}}`;
+                    timeLabel.textContent = `${{formatTime(video.currentTime)}} / ${{formatTime(TOTAL_DURATION)}}`;
                 }}
                 function updateProgress() {{
-                    const percent = video.duration ? (video.currentTime / video.duration) * 100 : 0;
+                    const percent = TOTAL_DURATION ? (video.currentTime / TOTAL_DURATION) * 100 : 0;
                     progressBarFill.style.width = percent + '%';
                     progressBarKnob.style.left = percent + '%';
                 }}
@@ -1169,7 +1474,7 @@ def embed():
                     const rect = progressBarBg.getBoundingClientRect();
                     const x = e.clientX - rect.left;
                     const percent = x / rect.width;
-                    video.currentTime = percent * video.duration;
+                    video.currentTime = percent * (TOTAL_DURATION || video.duration || 0);
                 }});
                 // Drag seek
                 let isSeeking = false;
@@ -1187,7 +1492,7 @@ def embed():
                     const rect = progressBarBg.getBoundingClientRect();
                     const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
                     const percent = x / rect.width;
-                    video.currentTime = percent * video.duration;
+                    video.currentTime = percent * (TOTAL_DURATION || video.duration || 0);
                 }}
                 // Fullscreen
                 const fullscreenBtn = document.getElementById('fullscreenBtn');
@@ -1340,9 +1645,13 @@ def video_proxy():
         }
         resp = requests.get(url, headers=headers, stream=True, timeout=config['request_timeout'])
         def generate():
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    yield chunk
+            mark_stream_start()
+            try:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
+            finally:
+                mark_stream_end()
         response = Response(generate(), status=resp.status_code)
         response.headers['Content-Type'] = resp.headers.get('content-type', 'application/octet-stream')
         response.headers['Content-Length'] = resp.headers.get('content-length', '')
