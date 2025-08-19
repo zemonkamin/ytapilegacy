@@ -9,6 +9,9 @@ We are looking for people who could help with the development of the project.
 Instances:
 - <a href="https://legacyprojects.ru/youtube/">LegacyProjects</a>
 - <a href="https://qqq.bccst.ru/youtube/">qqq.bccst.ru</a>
+<hr>
+### Install:
+pip install flask flask-cors yt-dlp google-auth google-auth-oauthlib google-api-python-client requests
 
 <hr>
 
