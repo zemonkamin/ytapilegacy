@@ -1,6 +1,5 @@
 {
     "api_key": "AIzaSyCve8OQH2HNIQ2oBwt6udvDoe0gvs5aTf",
-    "url": "https://qqq.bccst.ru/youtube/",
     "mainurl": "https://yt.legacyprojects.ru/",
     "default_quality": "360",
     "available_qualities": ["144", "240", "360", "480", "720", "1080", "1440", "2160"],

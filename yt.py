@@ -596,7 +596,6 @@ def get_author_videos_by_id():
                         'video_id': videoId,
                         'thumbnail': f"{config['mainurl']}thumbnail/{videoId}",
                         'channel_thumbnail': get_proxy_url(channelThumbnail, config['use_channel_thumbnail_proxy']),
-                        'url': f"{config['url']}/get-ytvideo-info.php?video_id={videoId}&quality={config['default_quality']}"
                     })
                     totalVideos += 1
             nextPageToken = videos_data.get('nextPageToken', '')
@@ -758,7 +757,6 @@ def get_search_videos():
                 'video_id': videoId,
                 'thumbnail': f"{config['mainurl']}thumbnail/{videoId}",
                 'channel_thumbnail': get_proxy_url(channelThumbnail, config['use_channel_thumbnail_proxy']),
-                'url': f"{config['url']}/get-ytvideo-info.php?video_id={videoId}&quality={config['default_quality']}"
             })
         return jsonify(searchResults)
     except Exception as e:
@@ -784,7 +782,6 @@ def get_top_videos():
                 'video_id': videoId,
                 'thumbnail': f"{config['mainurl']}thumbnail/{videoId}",
                 'channel_thumbnail': get_proxy_url(channelThumbnail, config['use_channel_thumbnail_proxy']),
-                'url': f"{config['url']}/get-ytvideo-info.php?video_id={videoId}&quality={config['default_quality']}"
             })
         return jsonify(topVideos)
     except Exception as e:
@@ -814,7 +811,6 @@ def get_categories_videos():
                 'video_id': videoId,
                 'thumbnail': f"{config['mainurl']}thumbnail/{videoId}",
                 'channel_thumbnail': get_proxy_url(channelThumbnail, config['use_channel_thumbnail_proxy']),
-                'url': f"{config['url']}/get-ytvideo-info.php?video_id={videoId}&quality={config['default_quality']}"
             })
         return jsonify(topVideos)
     except Exception as e:
