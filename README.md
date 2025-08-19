@@ -19,7 +19,7 @@ Instances:
 - recommendations
 - video search
 - getting video data
-- getting a direct link to the video
+- getting a direct link to the video (in various quality)
 - Video from a certain person
 - Getting information about the author of the video
 - Comments
