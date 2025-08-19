@@ -26,16 +26,6 @@ Instances:
 
 <hr>
 
-## Installation
-Installation involves downloading files from the repository to the host and configuring in config.php .
-## Setting up config.php
-- be sure to replace the url value with your api path.
-- optionally enter the general youtube_api_key
-- configure the proxy as desired (line 48)
-- optionally enter invidious_url and oldyoutube_url
-
-<hr>
-
 # The code will be updated
 It is planned to log in to the account and receive personal recommendations, as well as subscriptions.
 
