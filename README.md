@@ -46,5 +46,3 @@ Screenshots of the client using this API:
 <img src="screenshots/yt1.jpg" width=40%><img src="screenshots/yt2.jpg" width=40%>
 <br>
 <img src="screenshots/yt3.jpg" width=40%><img src="screenshots/yt4.jpg" width=40%>
-
-## The code is written and designed by Zemonkamin
