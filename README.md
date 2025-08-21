@@ -26,6 +26,8 @@ pip install flask flask-cors yt-dlp google-auth google-auth-oauthlib google-api-
 - Getting information about the author of the video
 - Comments
 - Search suggestions
+- authorization
+- personal recommendations
 
 <hr>
 
