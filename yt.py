@@ -2,19 +2,22 @@ import os
 import sys
 import json
 import requests
-from flask import Flask, request, jsonify, redirect, send_from_directory, Response
-from flask_cors import CORS
-from datetime import datetime, timedelta
-from urllib.parse import quote, urlencode, urlparse
-import yt_dlp
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
-from google.auth.transport.requests import Request
-import googleapiclient.discovery
-import uuid
-import subprocess
-import threading
+import qrcode
+import io
 import time
+import base64
+from flask import Flask, request, jsonify, Response, send_file, redirect
+from flask_cors import CORS
+from flask import session
+from datetime import datetime, timedelta
+from urllib.parse import quote, urlencode, urlparse, parse_qs
+import yt_dlp
+import googleapiclient.discovery
+import subprocess
+import html
+from threading import Lock, Thread
+import threading
+import secrets
 
 app = Flask(__name__)
 CORS(app)
@@ -22,52 +25,59 @@ CORS(app)
 # Load configuration from config.json
 with open('config.json', 'r', encoding='utf-8') as f:
     config = json.load(f)
+    
+app = Flask(__name__)
+app.secret_key = config.get('secretkey', '')
+CORS(app)
 
 # OAuth configuration from config
 CLIENT_ID = config.get('oauth_client_id', '')
 CLIENT_SECRET = config.get('oauth_client_secret', '')
-REDIRECT_URI = config.get('oauth_redirect_uri', 'http://localhost:2823/oauth-callback')
+REDIRECT_URI = "https://yt.legacyprojects.ru/oauth/callback"
 SCOPES = [
     'https://www.googleapis.com/auth/youtube.readonly',
     'https://www.googleapis.com/auth/youtube',
     'https://www.googleapis.com/auth/userinfo.profile'
 ]
 
-# Session storage
-sessions = {}
-tokens_file = 'tokens.json'
+# Global dictionary to store tokens by session ID
+token_store = {}
+token_store_lock = Lock()
 
-# Load saved tokens
-if os.path.exists(tokens_file):
-    with open(tokens_file, 'r') as f:
-        saved_tokens = json.load(f)
-else:
-    saved_tokens = {}
+def get_auth_url(session_id):
+    """Get authorization URL with session_id in state parameter"""
+    params = {
+        'client_id': CLIENT_ID,
+        'redirect_uri': REDIRECT_URI,
+        'response_type': 'code',
+        'scope': ' '.join(SCOPES),
+        'access_type': 'offline',
+        'prompt': 'consent',
+        'state': session_id
+    }
+    auth_request = requests.Request('GET', 'https://accounts.google.com/o/oauth2/auth', params=params)
+    return auth_request.prepare().url
 
-def save_tokens():
-    with open(tokens_file, 'w') as f:
-        json.dump(saved_tokens, f)
-
-# Helper functions
-
-# Streaming activity tracking for auto-restart
-active_streams_lock = threading.Lock()
-active_streams = 0
-last_stream_activity = time.time()
+def get_access_token(auth_code):
+    """Exchange code for access token"""
+    data = {
+        'code': auth_code,
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'redirect_uri': REDIRECT_URI,
+        'grant_type': 'authorization_code'
+    }
+    response = requests.post('https://oauth2.googleapis.com/token', data=data)
+    response.raise_for_status()
+    return response.json()
 
 def mark_stream_start():
-    global active_streams, last_stream_activity
-    with active_streams_lock:
-        active_streams += 1
-        last_stream_activity = time.time()
+    print(f"Stream started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 def mark_stream_end():
-    global active_streams, last_stream_activity
-    with active_streams_lock:
-        if active_streams > 0:
-            active_streams -= 1
-        last_stream_activity = time.time()
+    print(f"Stream ended at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+# Helper functions
 def get_channel_thumbnail(channel_id, api_key):
     if not config['fetch_channel_thumbnails']:
         return ''
@@ -165,7 +175,6 @@ def get_video_info_dict(video_id, apikey, use_video_proxy=True):
         statistics = videoData['statistics']
         channelId = videoInfo['channelId']
         channelThumbnail = get_channel_thumbnail(channelId, apikey)
-        # Получение прямой ссылки на видео
         finalVideoUrl = ''
         if not use_video_proxy:
             finalVideoUrlWithProxy = get_real_direct_video_url(video_id)
@@ -223,7 +232,6 @@ def get_video_info_ytdlp(video_id):
         return None
 
 # Routes
-
 @app.route('/')
 def home():
     port = 2823
@@ -334,6 +342,17 @@ def home():
                 </div>
                 <div class="endpoints">
                     <div class="endpoint">
+                        <h3>Authentication</h3>
+                        <p>/auth - OAuth authentication with QR code</p>
+                        <p>/auth/status - Check auth status</p>
+                        <p>/auth/simple - Simple auth (POST)</p>
+                    </div>
+                    <div class="endpoint">
+                        <h3>Recommendations</h3>
+                        <p>/get_recommendations_innertube?token=TOKEN&count=N - InnerTube API (формат как /get_top_videos.php)</p>
+                        <p style="font-size: 0.8em; color: #aaa;">Example: /get_recommendations_innertube?token=YOUR_TOKEN&count=10</p>
+                    </div>
+                    <div class="endpoint">
                         <h3>Video Information</h3>
                         <p>/get-ytvideo-info.php</p>
                     </div>
@@ -368,196 +387,370 @@ def home():
 
 @app.route('/auth')
 def auth():
-    session_id = str(uuid.uuid4())
-    flow = Flow.from_client_config(
-        client_config={
-            'web': {
-                'client_id': CLIENT_ID,
-                'client_secret': CLIENT_SECRET,
-                'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
-                'token_uri': 'https://oauth2.googleapis.com/token'
-            }
-        },
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
-    )
-    
-    flow.redirect_uri = REDIRECT_URI
-    
-    auth_url, _ = flow.authorization_url(
-        access_type='offline',
-        prompt='consent',
-        state=session_id
-    )
-    
-    return jsonify({
-        'auth_url': auth_url,
-        'session_id': session_id
-    })
+    """
+    Serves a page with a QR code or a token inside a <ytreq> element.
+    """
+    try:
+        if 'session_id' not in session:
+            session['session_id'] = str(time.time()) + secrets.token_hex(8)
+        
+        current_session_id = session['session_id']
+        
+        # Check the global token_store for the token.
+        if current_session_id in token_store:
+            token = token_store.get(current_session_id)
+            if token and not token.startswith("Error"):
+                session['auth_token'] = token
+                del token_store[current_session_id]
 
-@app.route('/oauth-callback')
+        # If a token is in the session, display the token.
+        if 'auth_token' in session and session['auth_token']:
+            token_display = f"Token: {html.escape(session['auth_token'])}"
+            return Response(f'''<ytreq>{token_display}</ytreq>''', mimetype='text/html')
+
+        # If no token, generate and display the QR code.
+        if 'auth_url' in session and time.time() - session.get('auth_url_timestamp', 0) < 300:
+            auth_url = session['auth_url']
+        else:
+            auth_url = get_auth_url(current_session_id)
+            session['auth_url'] = auth_url
+            session['auth_url_timestamp'] = time.time()
+        
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(auth_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        img_buffer = io.BytesIO()
+        img.save(img_buffer, format="PNG")
+        img_buffer.seek(0)
+        
+        qr_base64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+        
+        qr_display = qr_base64
+        return Response(f'''<ytreq>{qr_display}</ytreq>''', mimetype='text/html')
+
+    except Exception as e:
+        return Response(f'''<ytreq>Ошибка: {html.escape(str(e))}</ytreq>''', 500)
+
+@app.route('/auth/events')
+def auth_events():
+    """SSE endpoint to push token updates to the client"""
+    session_id = request.args.get('session_id')
+    if not session_id:
+        return Response(
+            'data: {"error": "Missing session_id"}\n\n',
+            mimetype='text/event-stream'
+        )
+
+    def generate():
+        start_time = time.time()
+        timeout = 300  # 5 minutes timeout
+        while time.time() - start_time < timeout:
+            with token_store_lock:
+                if session_id in token_store:
+                    token = token_store[session_id]
+                    yield f'data: {json.dumps({"token": token})}\n\n'
+                    del token_store[session_id]  # Clean up
+                    return
+            time.sleep(1)
+        yield f'data: {json.dumps({"error": "Authentication timed out"})}\n\n'
+
+    return Response(generate(), mimetype='text/event-stream')
+
+@app.route('/oauth/callback')
 def oauth_callback():
+    # ... (код остается без изменений) ...
     try:
         code = request.args.get('code')
         session_id = request.args.get('state')
-        
         if not code or not session_id:
-            return jsonify({'error': 'Missing code or session_id'}), 400
+            return '''
+                <html>
+                    <body>
+                        <h2>Authentication failed</h2>
+                        <p>No authorization code or state received.</p>
+                    </body>
+                </html>
+            ''', 400
+
+        try:
+            token_data = get_access_token(code)
+            access_token = token_data['access_token']
+            
+            session['auth_token'] = access_token
+            
+            with token_store_lock:
+                token_store[session_id] = access_token
+            
+            session.pop('auth_url', None)
+            session.pop('auth_url_timestamp', None)
+            
+            return '''
+                <html>
+                    <body>
+                        <h2>Authentication successful</h2>
+                        <p>You can close this window now and refresh the previous page.</p>
+                        <script>
+                            window.close();
+                        </script>
+                    </body>
+                </html>
+            '''
+        except Exception as e:
+            with token_store_lock:
+                token_store[session_id] = f"Error getting token: {str(e)}"
+            return f'''
+                <html>
+                    <body>
+                        <h2>Error</h2>
+                        <p>Error getting token: {html.escape(str(e))}</p>
+                    </body>
+                </html>
+            ''', 400
+    except Exception as e:
+        return f'''
+            <html>
+                <body>
+                    <h2>Internal server error</h2>
+                    <p>{html.escape(str(e))}</p>
+                </body>
+                </html>
+        ''', 500
+
+@app.route('/get_recommendations.php', methods=['GET'])
+def get_recommendations_innertube():
+    """Get recommendations using InnerTube API like in recs.py"""
+    try:
+        count = request.args.get('count', str(config.get('default_count', 20)))
+        try:
+            count = min(int(count), 50)  # Max 50 videos
+        except:
+            count = config.get('default_count', 20)
         
-        flow = Flow.from_client_config(
-            client_config={
-                'web': {
-                    'client_id': CLIENT_ID,
-                    'client_secret': CLIENT_SECRET,
-                    'auth_uri': 'https://accounts.google.com/o/oauth2/auth',
-                    'token_uri': 'https://oauth2.googleapis.com/token',
-                    'redirect_uris': [REDIRECT_URI]
+        access_token = request.args.get('token')
+        if not access_token:
+            return jsonify({'error': 'Missing token parameter. Use ?token=YOUR_ACCESS_TOKEN'}), 400
+
+        endpoint = "https://www.youtube.com/youtubei/v1/browse"
+        
+        payload = {
+            "context": {
+                "client": {
+                    "hl": "en",
+                    "gl": "US",
+                    "deviceMake": "Samsung",
+                    "deviceModel": "SmartTV",
+                    "userAgent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 NativeTVAds Safari/538.1,gzip(gfe)",
+                    "clientName": "TVHTML5",
+                    "clientVersion": "7.20250209.19.00",
+                    "osName": "Tizen",
+                    "osVersion": "5.0",
+                    "platform": "TV",
+                    "clientFormFactor": "UNKNOWN_FORM_FACTOR",
+                    "screenPixelDensity": 1
                 }
             },
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
-        )
-        
-        flow.fetch_token(code=code)
-        credentials = flow.credentials
-        
-        # Получаем информацию о пользователе
-        youtube = googleapiclient.discovery.build(
-            'oauth2', 'v2', credentials=credentials)
-        user_info = youtube.userinfo().get().execute()
-        
-        # Сохраняем сессию
-        sessions[session_id] = {
-            'tokens': {
-                'token': credentials.token,
-                'refresh_token': credentials.refresh_token,
-                'token_uri': credentials.token_uri,
-                'client_id': CLIENT_ID,
-                'client_secret': CLIENT_SECRET,
-                'scopes': credentials.scopes,
-                'expiry': credentials.expiry.isoformat() if credentials.expiry else None
-            },
-            'user_info': user_info,
-            'created_at': datetime.now().isoformat()
+            "browseId": "FEwhat_to_watch"
         }
         
-        # Сохраняем refresh token
-        if credentials.refresh_token:
-            saved_tokens[user_info['id']] = {
-                'refresh_token': credentials.refresh_token,
-                'user_info': user_info
-            }
-            save_tokens()
+        params = {
+            "key": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+            "prettyPrint": "false"
+        }
         
-        # Безопасный редирект с проверкой frontend_url
-        frontend_url = config.get('frontend_url', 'http://localhost:3000')
-        safe_redirect_url = f"{frontend_url}/auth-success?session_id={session_id}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 NativeTVAds Safari/538.1,gzip(gfe)',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Content-Type': 'application/json',
+            'Origin': 'https://www.youtube.com',
+            'Referer': 'https://www.youtube.com/',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive'
+        }
         
-        return redirect(safe_redirect_url)
-    
-    except Exception as e:
-        print('OAuth callback error:', str(e))
-        return jsonify({'error': 'Authentication failed', 'details': str(e)}), 500
-
-@app.route('/get_recommendations', methods=['GET'])
-def get_yt_recommendations():
-    try:
-        # 1. Проверяем аутентификацию
-        user_id = request.args.get('user_id')
-        if not user_id:
-            return jsonify({'error': 'Missing user_id parameter'}), 400
-            
-        user_data = saved_tokens.get(user_id)
-        if not user_data or not user_data.get('refresh_token'):
-            return jsonify({'error': 'User not authenticated or token missing'}), 401
-
-        # 2. Создаем авторизованный клиент YouTube
-        creds = Credentials(
-            token=None,
-            refresh_token=user_data['refresh_token'],
-            token_uri='https://oauth2.googleapis.com/token',
-            client_id=CLIENT_ID,
-            client_secret=CLIENT_SECRET,
-            scopes=SCOPES
-        )
-        creds.refresh(Request())
-
-        youtube = googleapiclient.discovery.build(
-            'youtube', 'v3', 
-            credentials=creds,
-            cache_discovery=False
-        )
-
-        # 3. Получаем рекомендации через несколько методов
-        all_recommendations = []
+        headers['Authorization'] = f'Bearer {access_token}'
         
-        # Метод 1: Популярные видео
         try:
-            popular_request = youtube.videos().list(
-                part="snippet",
-                chart="mostPopular",
-                maxResults=15,
-                regionCode="US"
-            )
-            popular_response = popular_request.execute()
-            for item in popular_response.get('items', []):
-                all_recommendations.append({
-                    'type': 'popular',
-                    'video_id': item['id'],
-                    'title': item['snippet']['title'],
-                    'channel': item['snippet']['channelTitle'],
-                    'thumbnail': item['snippet']['thumbnails']['high']['url']
-                })
+            response = requests.post(endpoint, json=payload, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+            json_data = response.json()
         except Exception as e:
-            print(f"Error fetching popular videos: {str(e)}")
+            error_msg = str(e)
+            error_msg = error_msg.replace('\u2026', '...').replace('\u2019', "'").replace('\u201c', '"').replace('\u201d', '"')
+            try:
+                error_msg = error_msg.encode('ascii', errors='ignore').decode('ascii')
+            except:
+                error_msg = "Request failed"
+            return jsonify({'error': 'InnerTube request failed', 'details': error_msg}), 500
 
-        # Метод 2: Персональные рекомендации
-        try:
-            activities_request = youtube.activities().list(
-                part="snippet,contentDetails",
-                mine=True,
-                maxResults=15
-            )
-            activities_response = activities_request.execute()
-            for item in activities_response.get('items', []):
-                if 'upload' in item['contentDetails']:
-                    vid = item['contentDetails']['upload']['videoId']
-                    all_recommendations.append({
-                        'type': 'personalized',
-                        'video_id': vid,
-                        'title': item['snippet']['title'],
-                        'channel': item['snippet']['channelTitle'],
-                        'thumbnail': f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
-                    })
-        except Exception as e:
-            print(f"Error fetching activities: {str(e)}")
-
-        # 4. Удаляем дубликаты
-        unique_recommendations = []
-        seen_videos = set()
-        for rec in all_recommendations:
-            if rec['video_id'] not in seen_videos:
-                seen_videos.add(rec['video_id'])
-                unique_recommendations.append(rec)
-
-        return jsonify({
-            'status': 'success',
-            'count': len(unique_recommendations),
-            'recommendations': unique_recommendations
-        })
+        videos = extract_innertube_data(json_data, count)
+        
+        formatted_videos = []
+        for video in videos:
+            if video and video.get('video_id') and video.get('video_id') != 'unknown':
+                formatted_video = {
+                    'title': video.get('title', 'No Title'),
+                    'author': video.get('author', 'Unknown'),
+                    'video_id': video.get('video_id'),
+                    'thumbnail': f"{config['mainurl']}thumbnail/{video.get('video_id')}",
+                    'channel_thumbnail': ''
+                }
+                formatted_videos.append(formatted_video)
+        
+        return jsonify(formatted_videos)
 
     except Exception as e:
-        print(f"API request failed: {str(e)}")
+        error_msg = str(e)
+        error_msg = error_msg.replace('\u2026', '...').replace('\u2019', "'").replace('\u201c', '"').replace('\u201d', '"')
+        try:
+            error_msg = error_msg.encode('ascii', errors='ignore').decode('ascii')
+        except:
+            error_msg = "Request failed"
         return jsonify({
             'error': 'API request failed',
-            'details': str(e)
+            'details': error_msg
         }), 500
+
+def extract_innertube_data(json_data, max_videos):
+    videos = []
+    
+    if not json_data:
+        return videos
+    
+    try:
+        contents = json_data.get('contents', {})
+        
+        if 'tvBrowseRenderer' in contents:
+            tv_content = contents['tvBrowseRenderer']['content']['tvSurfaceContentRenderer']['content']
+            sections = tv_content['sectionListRenderer']['contents']
+            
+            for section in sections:
+                if len(videos) >= max_videos:
+                    break
+                if 'shelfRenderer' in section:
+                    shelf = section['shelfRenderer']
+                    content = shelf.get('content', {})
+                    
+                    if 'horizontalListRenderer' in content:
+                        items = content['horizontalListRenderer'].get('items', [])
+                        for item in items:
+                            if len(videos) >= max_videos:
+                                break
+                            if 'tileRenderer' in item:
+                                video_data = parse_tile_renderer(item['tileRenderer'])
+                                if video_data:
+                                    videos.append(video_data)
+        
+        elif 'twoColumnBrowseResultsRenderer' in contents:
+            tabs = contents['twoColumnBrowseResultsRenderer']['tabs']
+            for tab in tabs:
+                if len(videos) >= max_videos:
+                    break
+                if 'tabRenderer' in tab:
+                    tab_content = tab['tabRenderer'].get('content', {})
+                    if 'sectionListRenderer' in tab_content:
+                        sections = tab_content['sectionListRenderer']['contents']
+                        for section in sections:
+                            if len(videos) >= max_videos:
+                                break
+                            if 'itemSectionRenderer' in section:
+                                items = section['itemSectionRenderer']['contents']
+                                for item in items:
+                                    if len(videos) >= max_videos:
+                                        break
+                                    if 'shelfRenderer' in item:
+                                        shelf = item['shelfRenderer']
+                                        shelf_content = shelf.get('content', {})
+                                        if 'expandedShelfContentsRenderer' in shelf_content:
+                                            video_items = shelf_content['expandedShelfContentsRenderer']['items']
+                                            for video_item in video_items:
+                                                if len(videos) >= max_videos:
+                                                    break
+                                                if 'videoRenderer' in video_item:
+                                                    video_data = parse_video_renderer(video_item['videoRenderer'])
+                                                    if video_data:
+                                                        videos.append(video_data)
+        
+        return videos[:max_videos]
+        
+    except Exception as e:
+        try:
+            error_msg = str(e).replace('\u2026', '...').replace('\u2019', "'").replace('\u201c', '"').replace('\u201d', '"')
+            error_msg = error_msg.encode('ascii', errors='ignore').decode('ascii')
+        except:
+            error_msg = "Data extraction failed"
+        return videos
+
+def parse_tile_renderer(tile):
+    try:
+        video_id = tile.get('onSelectCommand', {}).get('watchEndpoint', {}).get('videoId', 'unknown')
+        if video_id == 'unknown':
+            return None
+        
+        title = tile.get('metadata', {}).get('tileMetadataRenderer', {}).get('title', {}).get('simpleText', 'No Title')
+        
+        author = "Unknown"
+        try:
+            lines = tile['metadata']['tileMetadataRenderer'].get('lines', [])
+            if lines and len(lines) > 0:
+                line_renderer = lines[0].get('lineRenderer', {})
+                items = line_renderer.get('items', [])
+                if items:
+                    line_item = items[0].get('lineItemRenderer', {})
+                    text = line_item.get('text', {})
+                    if 'runs' in text and text['runs']:
+                        raw_author = text['runs'][0].get('text', 'Unknown')
+                        author = raw_author.replace('\u2026', '...').replace('\u2019', "'").replace('\u201c', '"').replace('\u201d', '"')
+                        try:
+                            author = author.encode('ascii', errors='ignore').decode('ascii')
+                        except:
+                            author = "Unknown"
+        except Exception as e:
+            pass
+        
+        return {
+            'video_id': video_id,
+            'title': title,
+            'author': author
+        }
+        
+    except Exception as e:
+        return None
+
+def parse_video_renderer(video):
+    try:
+        raw_title = video.get('title', {}).get('runs', [{}])[0].get('text', 'No Title')
+        raw_author = video.get('ownerText', {}).get('runs', [{}])[0].get('text', 'Unknown')
+        
+        title = raw_title.replace('\u2026', '...').replace('\u2019', "'").replace('\u201c', '"').replace('\u201d', '"')
+        author = raw_author.replace('\u2026', '...').replace('\u2019', "'").replace('\u201c', '"').replace('\u201d', '"')
+        
+        try:
+            title = title.encode('ascii', errors='ignore').decode('ascii')
+            author = author.encode('ascii', errors='ignore').decode('ascii')
+        except:
+            pass
+        
+        return {
+            'video_id': video.get('videoId', 'unknown'),
+            'title': title,
+            'author': author
+        }
+    except Exception as e:
+        return None
 
 @app.route('/get_author_videos_by_id.php', methods=['GET'])
 def get_author_videos_by_id():
     try:
         channel_id = request.args.get('channel_id')
-        count = int(request.args.get('count', '50'))
+        count = int(request.args.get('count', str(config.get('default_count', 50))))
         apikey = request.args.get('apikey', config['api_key'])
 
         if not channel_id:
@@ -636,7 +829,6 @@ def get_author_videos():
         if not channelId:
             return jsonify({'error': 'Channel not found'})
 
-        # Redirect to get_author_videos_by_id.php with the found channel ID
         return redirect(f"/get_author_videos_by_id.php?channel_id={channelId}&count={count}&apikey={apikey}")
     except Exception as e:
         print('Error in get_author_videos:', e)
@@ -671,7 +863,7 @@ def get_channel_thumbnail_api():
 def get_related_videos():
     try:
         video_id = request.args.get('video_id')
-        count = int(request.args.get('count', '50'))
+        count = int(request.args.get('count', str(config.get('default_count', 50))))
         apikey = request.args.get('apikey', config['api_key'])
 
         if not video_id:
@@ -696,7 +888,6 @@ def get_related_videos():
             vinfo = video['snippet']
             vid = video['id']['videoId']
             channelThumbnail = get_channel_thumbnail(vinfo['channelId'], apikey)
-            # Get video statistics
             stats_resp = requests.get(f"https://www.googleapis.com/youtube/v3/videos?part=statistics&id={vid}&key={apikey}")
             stats_resp.raise_for_status()
             stats_data = stats_resp.json()
@@ -737,7 +928,7 @@ def get_search_suggestions():
 def get_search_videos():
     try:
         query = request.args.get('query')
-        count = int(request.args.get('count', '50'))
+        count = int(request.args.get('count', str(config.get('default_count', 50))))
         apikey = request.args.get('apikey', config['api_key'])
         if not query:
             return jsonify({'error': 'Параметр query не указан'})
@@ -766,7 +957,7 @@ def get_search_videos():
 @app.route('/get_top_videos.php', methods=['GET'])
 def get_top_videos():
     try:
-        count = int(request.args.get('count', '50'))
+        count = int(request.args.get('count', str(config.get('default_count', 50))))
         apikey = request.args.get('apikey', config['api_key'])
         resp = requests.get(f"https://www.googleapis.com/youtube/v3/videos?part=snippet&chart=mostPopular&maxResults={count}&key={apikey}")
         resp.raise_for_status()
@@ -791,7 +982,7 @@ def get_top_videos():
 @app.route('/get-categories_videos.php', methods=['GET'])
 def get_categories_videos():
     try:
-        count = int(request.args.get('count', '50'))
+        count = int(request.args.get('count', str(config.get('default_count', 50))))
         categoryId = request.args.get('categoryId')
         apikey = request.args.get('apikey', config['api_key'])
         url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet&chart=mostPopular&maxResults={count}&key={apikey}"
@@ -854,10 +1045,10 @@ def direct_url():
     try:
         video_id = request.args.get('video_id')
         quality = request.args.get('quality')
+        
         if not video_id:
             return jsonify({'error': 'ID видео не был передан.'}), 400
-
-        # Fetch video duration upfront using yt_dlp
+        
         duration_value = None
         try:
             ydl_opts_info = {'quiet': True, 'no_warnings': True}
@@ -1095,6 +1286,8 @@ def direct_url():
                                     break
                         except Exception:
                             pass
+                    
+                    # Исправлено: использование импортированного модуля threading
                     threading.Thread(target=_drain_stderr, daemon=True).start()
 
                     def generate():
@@ -1169,392 +1362,12 @@ def thumbnail_proxy(video_id):
         print('Error in /thumbnail:', e)
         return '', 404
 
-@app.route('/embed', methods=['GET'])
-def embed():
-    video_id = request.args.get('video_id')
-    if not video_id:
-        return '<h2>Не передан video_id</h2>', 400
-    try:
-        # Получаем данные о видео только через yt-dlp
-        video_info = get_video_info_ytdlp(video_id)
-        if not video_info:
-            return '<h2>Видео не найдено или не удалось получить данные</h2>', 404
-        # Форматируем дату публикации
-        published_at = video_info['published_at']
-        if published_at and len(published_at) == 8:
-            published_at = f"{published_at[6:8]}.{published_at[4:6]}.{published_at[0:4]}"
-        else:
-            published_at = ''
-        # Форматируем длительность и готовим числовое значение для встраивания в JS
-        duration = video_info['duration']
-        if duration:
-            duration_str = str(timedelta(seconds=duration))
-            duration_seconds = int(duration)
-        else:
-            duration_str = ''
-            duration_seconds = 0
-        return '''
-        <!DOCTYPE html>
-        <html lang="ru">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <link href="https://fonts.googleapis.com/css?family=Roboto:400,500,700&display=swap" rel="stylesheet">
-            <title>{title} — YouTube Legacy Embed</title>
-            <style>
-                html, body {{
-                    height: 100%;
-                    margin: 0;
-                    padding: 0;
-                    background: #000;
-                    overflow: hidden;
-                    font-family: 'Roboto', 'Segoe UI', Arial, sans-serif;
-                }}
-                body {{
-                    width: 100vw;
-                    height: 100vh;
-                    font-family: 'Roboto', 'Segoe UI', Arial, sans-serif;
-                }}
-                .video-bg {{
-                    position: fixed;
-                    top: 0; left: 0; right: 0; bottom: 0;
-                    width: 100vw;
-                    height: 100vh;
-                    background: #000;
-                    z-index: 0;
-                }}
-                .video-title-bar {{
-                    position: absolute;
-                    top: 0; left: 0; right: 0;
-                    width: 100vw;
-                    background: linear-gradient(180deg, rgba(0,0,0,0.85) 80%, rgba(0,0,0,0.0) 100%);
-                    color: #fff;
-                    padding: 32px 40px 24px 40px;
-                    font-size: 1.5em;
-                    font-weight: 600;
-                    letter-spacing: 0.01em;
-                    z-index: 10;
-                    display: flex;
-                    align-items: flex-end;
-                    min-height: 90px;
-                    box-sizing: border-box;
-                    opacity: 1;
-                    transition: opacity 0.5s;
-                    pointer-events: auto;
-                    font-family: 'Roboto', 'Segoe UI', Arial, sans-serif;
-                }}
-                .video-title-bar.hide {{
-                    opacity: 0;
-                    pointer-events: none;
-                }}
-                .player-wrapper {{
-                    position: fixed;
-                    top: 0; left: 0; right: 0; bottom: 0;
-                    width: 100vw;
-                    height: 100vh;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    z-index: 1;
-                }}
-                video {{
-                    width: 100vw;
-                    height: 100vh;
-                    object-fit: contain;
-                    background: #000;
-                    display: block;
-                }}
-                .custom-controls {{
-                    position: absolute;
-                    left: 0;
-                    right: 0;
-                    bottom: 0;
-                    width: 100vw;
-                    background: linear-gradient(0deg, rgba(0,0,0,0.85) 80%, rgba(0,0,0,0.0) 100%);
-                    z-index: 20;
-                    display: flex;
-                    align-items: center;
-                    gap: 16px;
-                    padding: 0 24px 18px 24px;
-                    user-select: none;
-                    opacity: 1;
-                    transition: opacity 0.4s;
-                    flex-wrap: wrap;
-                    min-width: 0;
-                    box-sizing: border-box;
-                }}
-                .custom-controls.hide {{
-                    opacity: 0;
-                    pointer-events: none;
-                }}
-                .play-btn, .fullscreen-btn {{
-                    background: none;
-                    border: none;
-                    color: #fff;
-                    border-radius: 50%;
-                    width: 44px;
-                    height: 44px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    cursor: pointer;
-                    font-size: 1.5em;
-                    transition: background 0.2s;
-                    outline: none;
-                    min-width: 44px;
-                    min-height: 44px;
-                }}
-                .play-btn img {{
-                    width: 28px;
-                    height: 28px;
-                    display: block;
-                }}
-                .play-btn:hover, .fullscreen-btn:hover {{
-                    background: rgba(60,60,60,0.35);
-                }}
-                .progress-container {{
-                    flex: 1;
-                    display: flex;
-                    align-items: center;
-                    height: 32px;
-                    margin: 0 12px;
-                    min-width: 40px;
-                    max-width: 100%;
-                }}
-                .progress-bar-bg {{
-                    width: 100%;
-                    height: 6px;
-                    background: #333;
-                    border-radius: 3px;
-                    cursor: pointer;
-                    position: relative;
-                }}
-                .progress-bar-fill {{
-                    height: 100%;
-                    background: #f00;
-                    border-radius: 3px;
-                    width: 0%;
-                    position: absolute;
-                    left: 0; top: 0;
-                }}
-                .progress-bar-knob {{
-                    position: absolute;
-                    top: 50%;
-                    transform: translateY(-50%);
-                    width: 14px;
-                    height: 14px;
-                    background: #fff;
-                    border-radius: 50%;
-                    left: 0%;
-                    margin-left: -7px;
-                    box-shadow: 0 2px 8px #0006;
-                    pointer-events: none;
-                }}
-                .time-label {{
-                    color: #fff;
-                    font-size: 1em;
-                    min-width: 70px;
-                    text-align: center;
-                    font-variant-numeric: tabular-nums;
-                    font-family: 'Roboto', 'Segoe UI', Arial, sans-serif;
-                }}
-                .fullscreen-btn {{
-                    margin-left: 10px;
-                    margin-right: 0;
-                    flex-shrink: 0;
-                }}
-                @media (max-width: 600px) {{
-                    .video-title-bar {{
-                        font-size: 1em;
-                        padding: 18px 12px 12px 12px;
-                        min-height: 48px;
-                    }}
-                    .custom-controls {{
-                        padding: 0 2vw 8px 2vw;
-                        gap: 6px;
-                        flex-wrap: wrap;
-                        box-sizing: border-box;
-                    }}
-                    .play-btn, .fullscreen-btn {{
-                        width: 36px;
-                        height: 36px;
-                        font-size: 1.1em;
-                        min-width: 36px;
-                        min-height: 36px;
-                    }}
-                    .play-btn img {{
-                        width: 20px;
-                        height: 20px;
-                    }}
-                    .progress-container {{
-                        min-width: 20px;
-                        max-width: 100%;
-                    }}
-                    .time-label {{
-                        min-width: 38px;
-                        font-size: 0.85em;
-                    }}
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="video-bg"></div>
-            <div class="player-wrapper">
-                <video id="yt-embed-video" preload="auto" src="{video_url}"></video>
-                <!-- Пример использования превью -->
-                <img src="/thumbnail/{video_id}" alt="thumbnail" style="display:none;" id="videoThumbnail">
-                <div class="custom-controls" id="controlsBar">
-                    <button class="play-btn" id="playBtn" title="Воспроизвести/Пауза"><img id="playPauseIcon" src="https://cdn-icons-png.flaticon.com/512/9974/9974136.png" alt="play"></button>
-                    <div class="progress-container">
-                        <div class="progress-bar-bg" id="progressBarBg">
-                            <div class="progress-bar-fill" id="progressBarFill"></div>
-                            <div class="progress-bar-knob" id="progressBarKnob"></div>
-                        </div>
-                    </div>
-                    <span class="time-label" id="timeLabel">0:00 / 0:00</span>
-                    <button class="fullscreen-btn" id="fullscreenBtn" title="На весь экран">⛶</button>
-                </div>
-            </div>
-            <div class="video-title-bar" id="titleBar">{title}</div>
-            <script>
-                const video = document.getElementById('yt-embed-video');
-                const playBtn = document.getElementById('playBtn');
-                const playPauseIcon = document.getElementById('playPauseIcon');
-                const controlsBar = document.getElementById('controlsBar');
-                const progressBarBg = document.getElementById('progressBarBg');
-                const progressBarFill = document.getElementById('progressBarFill');
-                const progressBarKnob = document.getElementById('progressBarKnob');
-                const timeLabel = document.getElementById('timeLabel');
-                const titleBar = document.getElementById('titleBar');
-                let hideUITimeout = null;
-                const TOTAL_DURATION = {duration_seconds};
-                function formatTime(sec) {{
-                    if (isNaN(sec) || sec === Infinity) return '0:00';
-                    sec = Math.floor(sec);
-                    const m = Math.floor(sec / 60);
-                    const s = sec % 60;
-                    return `${{m}}:${{s.toString().padStart(2, '0')}}`;
-                }}
-                function updatePlayIcon() {{
-                    if (video.paused) {{
-                        playPauseIcon.src = 'https://cdn-icons-png.flaticon.com/512/9974/9974136.png';
-                        playPauseIcon.alt = 'play';
-                    }} else {{
-                        playPauseIcon.src = 'https://cdn-icons-png.flaticon.com/512/13077/13077337.png';
-                        playPauseIcon.alt = 'pause';
-                    }}
-                }}
-                function updateTime() {{
-                    timeLabel.textContent = `${{formatTime(video.currentTime)}} / ${{formatTime(TOTAL_DURATION)}}`;
-                }}
-                function updateProgress() {{
-                    const percent = TOTAL_DURATION ? (video.currentTime / TOTAL_DURATION) * 100 : 0;
-                    progressBarFill.style.width = percent + '%';
-                    progressBarKnob.style.left = percent + '%';
-                }}
-                playBtn.addEventListener('click', () => {{
-                    if (video.paused) video.play(); else video.pause();
-                }});
-                video.addEventListener('play', updatePlayIcon);
-                video.addEventListener('pause', updatePlayIcon);
-                video.addEventListener('timeupdate', () => {{
-                    updateTime();
-                    updateProgress();
-                }});
-                video.addEventListener('loadedmetadata', () => {{
-                    updateTime();
-                    updateProgress();
-                }});
-                // Seek
-                progressBarBg.addEventListener('click', (e) => {{
-                    const rect = progressBarBg.getBoundingClientRect();
-                    const x = e.clientX - rect.left;
-                    const percent = x / rect.width;
-                    video.currentTime = percent * (TOTAL_DURATION || video.duration || 0);
-                }});
-                // Drag seek
-                let isSeeking = false;
-                progressBarBg.addEventListener('mousedown', (e) => {{
-                    isSeeking = true;
-                    seek(e);
-                }});
-                document.addEventListener('mousemove', (e) => {{
-                    if (isSeeking) seek(e);
-                }});
-                document.addEventListener('mouseup', () => {{
-                    isSeeking = false;
-                }});
-                function seek(e) {{
-                    const rect = progressBarBg.getBoundingClientRect();
-                    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-                    const percent = x / rect.width;
-                    video.currentTime = percent * (TOTAL_DURATION || video.duration || 0);
-                }}
-                // Fullscreen
-                const fullscreenBtn = document.getElementById('fullscreenBtn');
-                fullscreenBtn.addEventListener('click', () => {{
-                    if (!document.fullscreenElement) {{
-                        document.documentElement.requestFullscreen();
-                    }} else {{
-                        document.exitFullscreen();
-                    }}
-                }});
-                // Hide UI on inactivity
-                function showUI() {{
-                    controlsBar.classList.remove('hide');
-                    titleBar.classList.remove('hide');
-                    clearTimeout(hideUITimeout);
-                    if (!video.paused) {{
-                        hideUITimeout = setTimeout(hideUI, 2000);
-                    }}
-                }}
-                function hideUI() {{
-                    controlsBar.classList.add('hide');
-                    titleBar.classList.add('hide');
-                }}
-                document.addEventListener('mousemove', showUI);
-                document.addEventListener('keydown', showUI);
-                video.addEventListener('play', () => {{
-                    showUI();
-                }});
-                video.addEventListener('pause', () => {{
-                    showUI();
-                }});
-                // Play/pause on click outside controls and title bar
-                const playerWrapper = document.querySelector('.player-wrapper');
-                playerWrapper.addEventListener('click', function(e) {{
-                    if (
-                        !e.target.closest('.custom-controls') &&
-                        !e.target.closest('.video-title-bar')
-                    ) {{
-                        if (video.paused) video.play(); else video.pause();
-                    }}
-                }});
-                // Prevent context menu on right click
-                video.addEventListener('contextmenu', e => e.preventDefault());
-                // Init
-                updatePlayIcon();
-                updateTime();
-                updateProgress();
-            </script>
-        </body>
-        </html>
-        '''.format(
-            title=video_info['title'],
-            video_url=video_info['video_url'],
-            video_id=video_info['video_id']
-        )
-    except Exception as e:
-        print('Error in /embed:', e)
-        return '<h2>Ошибка загрузки видео</h2>', 500
-
 @app.route('/get-ytvideo-info.php', methods=['GET'])
 def get_ytvideo_info():
     try:
         video_id = request.args.get('video_id')
         quality = request.args.get('quality', config['default_quality'])
         apikey = request.args.get('apikey', config['api_key'])
-        # Новый параметр proxy
         proxy_param = request.args.get('proxy', 'true').lower()
         use_video_proxy = proxy_param != 'false'
         if not video_id:
@@ -1570,14 +1383,11 @@ def get_ytvideo_info():
         statistics = videoData['statistics']
         channelId = videoInfo['channelId']
         channelThumbnail = get_channel_thumbnail(channelId, apikey)
-        # Получение прямой ссылки на видео
         finalVideoUrl = ''
         if not use_video_proxy:
-            # Получаем реальную прямую ссылку через yt_dlp
             finalVideoUrlWithProxy = get_real_direct_video_url(video_id)
         else:
             if config['video_source'] == 'direct':
-                # Используем локальный endpoint direct_url
                 finalVideoUrl = f"{config['mainurl']}direct_url?video_id={video_id}"
                 finalVideoUrlWithProxy = finalVideoUrl
             else:
@@ -1585,7 +1395,6 @@ def get_ytvideo_info():
                 finalVideoUrlWithProxy = finalVideoUrl
                 if config['use_video_proxy'] and finalVideoUrl:
                     finalVideoUrlWithProxy = f"{config['mainurl']}video.proxy?url={quote(finalVideoUrl)}"
-        # Комментарии
         comments = []
         try:
             comments_resp = requests.get(f"https://www.googleapis.com/youtube/v3/commentThreads?key={apikey}&textFormat=plainText&part=snippet&videoId={video_id}&maxResults=25", timeout=config['request_timeout'])
@@ -1641,13 +1450,12 @@ def video_proxy():
         }
         resp = requests.get(url, headers=headers, stream=True, timeout=config['request_timeout'])
         def generate():
-            mark_stream_start()
             try:
                 for chunk in resp.iter_content(chunk_size=8192):
                     if chunk:
                         yield chunk
             finally:
-                mark_stream_end()
+                pass
         response = Response(generate(), status=resp.status_code)
         response.headers['Content-Type'] = resp.headers.get('content-type', 'application/octet-stream')
         response.headers['Content-Length'] = resp.headers.get('content-length', '')

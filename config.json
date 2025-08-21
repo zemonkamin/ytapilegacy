@@ -1,5 +1,5 @@
 {
-    "api_key": "AIzaSyCve8OQH2HNIQ2oBwt6udvDoe0gvs5aTf",
+    "api_key": "apikey",
     "mainurl": "https://yt.legacyprojects.ru/",
     "default_quality": "360",
     "available_qualities": ["144", "240", "360", "480", "720", "1080", "1440", "2160"],
@@ -10,5 +10,7 @@
     "video_source": "direct",
     "fetch_channel_thumbnails": false,
     "use_cookies": true,
-    "frontend_url": "http://localhost:3000"
+	"oauth_client_id": "oauth_client_id",
+    "oauth_client_secret": "oauth_client_secret",
+	"secretkey": "test"
 }
