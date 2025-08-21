@@ -59,13 +59,25 @@ def get_auth_url(session_id):
     return auth_request.prepare().url
 
 def get_access_token(auth_code):
-    """Exchange code for access token"""
+    """Exchange code for access token and refresh token"""
     data = {
         'code': auth_code,
         'client_id': CLIENT_ID,
         'client_secret': CLIENT_SECRET,
         'redirect_uri': REDIRECT_URI,
         'grant_type': 'authorization_code'
+    }
+    response = requests.post('https://oauth2.googleapis.com/token', data=data)
+    response.raise_for_status()
+    return response.json()
+
+def refresh_access_token(refresh_token):
+    """Get new access token using refresh token"""
+    data = {
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'refresh_token': refresh_token,
+        'grant_type': 'refresh_token'
     }
     response = requests.post('https://oauth2.googleapis.com/token', data=data)
     response.raise_for_status()
@@ -349,7 +361,7 @@ def home():
                     </div>
                     <div class="endpoint">
                         <h3>Recommendations</h3>
-                        <p>/get_recommendations_innertube?token=TOKEN&count=N - InnerTube API (формат как /get_top_videos.php)</p>
+                        <p>/get_recommendations.php?token=TOKEN&count=N - InnerTube API (формат как /get_top_videos.php)</p>
                         <p style="font-size: 0.8em; color: #aaa;">Example: /get_recommendations_innertube?token=YOUR_TOKEN&count=10</p>
                     </div>
                     <div class="endpoint">
@@ -400,12 +412,12 @@ def auth():
         if current_session_id in token_store:
             token = token_store.get(current_session_id)
             if token and not token.startswith("Error"):
-                session['auth_token'] = token
+                session['refresh_token'] = token
                 del token_store[current_session_id]
 
         # If a token is in the session, display the token.
-        if 'auth_token' in session and session['auth_token']:
-            token_display = f"Token: {html.escape(session['auth_token'])}"
+        if 'refresh_token' in session and session['refresh_token']:
+            token_display = f"Token: {html.escape(session['refresh_token'])}"
             return Response(f'''<ytreq>{token_display}</ytreq>''', mimetype='text/html')
 
         # If no token, generate and display the QR code.
@@ -465,7 +477,6 @@ def auth_events():
 
 @app.route('/oauth/callback')
 def oauth_callback():
-    # ... (код остается без изменений) ...
     try:
         code = request.args.get('code')
         session_id = request.args.get('state')
@@ -481,12 +492,22 @@ def oauth_callback():
 
         try:
             token_data = get_access_token(code)
-            access_token = token_data['access_token']
+            refresh_token = token_data.get('refresh_token')
             
-            session['auth_token'] = access_token
+            if not refresh_token:
+                return '''
+                    <html>
+                        <body>
+                            <h2>Authentication failed</h2>
+                            <p>No refresh token received. Please try again.</p>
+                        </body>
+                    </html>
+                ''', 400
+            
+            session['refresh_token'] = refresh_token
             
             with token_store_lock:
-                token_store[session_id] = access_token
+                token_store[session_id] = refresh_token
             
             session.pop('auth_url', None)
             session.pop('auth_url_timestamp', None)
@@ -533,9 +554,16 @@ def get_recommendations_innertube():
         except:
             count = config.get('default_count', 20)
         
-        access_token = request.args.get('token')
-        if not access_token:
-            return jsonify({'error': 'Missing token parameter. Use ?token=YOUR_ACCESS_TOKEN'}), 400
+        refresh_token = request.args.get('token')
+        if not refresh_token:
+            return jsonify({'error': 'Missing token parameter. Use ?token=YOUR_REFRESH_TOKEN'}), 400
+
+        # Get access token from refresh token
+        try:
+            token_data = refresh_access_token(refresh_token)
+            access_token = token_data['access_token']
+        except Exception as e:
+            return jsonify({'error': 'Invalid refresh token', 'details': str(e)}), 401
 
         endpoint = "https://www.youtube.com/youtubei/v1/browse"
         
