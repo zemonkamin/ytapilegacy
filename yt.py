@@ -588,7 +588,7 @@ def get_recommendations_innertube():
         }
         
         params = {
-            "key": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+            "key": config['api_key'],
             "prettyPrint": "false"
         }
         
