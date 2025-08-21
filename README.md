@@ -11,7 +11,7 @@ Instances:
 - <a href="https://qqq.bccst.ru/youtube/">qqq.bccst.ru</a>
 <hr>
 Install:
-pip install flask flask-cors yt-dlp google-auth google-auth-oauthlib google-api-python-client requests
+pip install flask flask-cors yt-dlp google-auth google-auth-oauthlib google-api-python-client requests pillow qrcode
 
 <hr>
 
