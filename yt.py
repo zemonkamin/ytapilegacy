@@ -84,7 +84,7 @@ def refresh_access_token(refresh_token):
     response = requests.post('https://oauth2.googleapis.com/token', data=data)
     response.raise_for_status()
     return response.json()
-
+    
 def get_account_info(access_token):
     """Get Google account information using access token"""
     headers = {
@@ -130,16 +130,37 @@ def mark_stream_end():
 
 # Helper functions
 def get_channel_thumbnail(channel_id, api_key):
+    """Get channel thumbnail with multiple fallback methods"""
     if not config['fetch_channel_thumbnails']:
         return ''
+    
+    print(f"DEBUG: Getting channel thumbnail for channel_id: {channel_id}")
+    
+    # Method 1: Try YouTube API to get channel thumbnail
     try:
-        r = requests.get(f"https://www.googleapis.com/youtube/v3/channels?id={channel_id}&key={api_key}&part=snippet", timeout=config['request_timeout'])
+        r = requests.get(
+            f"https://www.googleapis.com/youtube/v3/channels?id={channel_id}&key={api_key}&part=snippet", 
+            timeout=config['request_timeout']
+        )
         r.raise_for_status()
         data = r.json()
-        return data['items'][0]['snippet']['thumbnails']['default']['url'] if data['items'] else ''
+        
+        print(f"DEBUG: API response: {json.dumps(data, ensure_ascii=False)[:200]}...")
+        
+        if data.get('items') and data['items']:
+            # Get channel thumbnail from channel data
+            channel_snippet = data['items'][0]['snippet']
+            thumbnail_url = channel_snippet['thumbnails']['default']['url']
+            print(f"DEBUG: Found channel thumbnail: {thumbnail_url}")
+            return thumbnail_url
+        else:
+            print("DEBUG: No items in API response")
+                
     except Exception as e:
-        print('Error getting channel thumbnail:', e)
-        return ''
+        print(f'Error getting channel thumbnail from API for {channel_id}: {e}')
+    
+    # Fallback
+    return 'https://yt3.ggpht.com/a/default-user=s88-c-k-c0x00ffffff-no-rj'
 
 def get_proxy_url(url, use_proxy):
     if not use_proxy:
@@ -1533,7 +1554,7 @@ def extract_innertube_data(json_data, max_videos):
                             if len(videos) >= max_videos:
                                 break
                             if 'itemSectionRenderer' in section:
-                                items = section['itemSectionRenderer'].get('contents', [])
+                                items = section['itemSectionRenderer']['contents']
                                 for item in items:
                                     if len(videos) >= max_videos:
                                         break
@@ -2189,19 +2210,42 @@ def get_ytvideo_info():
         apikey = request.args.get('apikey', config['api_key'])
         proxy_param = request.args.get('proxy', 'true').lower()
         use_video_proxy = proxy_param != 'false'
+        
         if not video_id:
             return jsonify({'error': 'ID видео не был передан.'})
+        
         resp = requests.get(f"https://www.googleapis.com/youtube/v3/videos?id={video_id}&key={apikey}&part=snippet,contentDetails,statistics", timeout=config['request_timeout'])
         resp.raise_for_status()
         data = resp.json()
         videoData = data['items'][0] if data.get('items') and data['items'] else None
+        
         if not videoData:
             return jsonify({'error': 'Видео не найдено.'})
+        
         videoInfo = videoData['snippet']
         contentDetails = videoData['contentDetails']
         statistics = videoData['statistics']
         channelId = videoInfo['channelId']
-        channelThumbnail = get_channel_thumbnail(channelId, apikey)
+        
+        
+        r = requests.get(
+            f"https://www.googleapis.com/youtube/v3/channels?id={channelId}&key={apikey}&part=snippet,statistics", 
+            timeout=config['request_timeout']
+        )
+        r.raise_for_status()
+        data = r.json()
+        
+        print(f"DEBUG: API response: {json.dumps(data, ensure_ascii=False)[:200]}...")
+        
+        if data.get('items') and data['items']:
+            # Get channel thumbnail from channel data
+            channel_snippet = data['items'][0]['snippet']
+            thumbnail_url = channel_snippet['thumbnails']['default']['url']
+            subscriberCount = data['items'][0]['statistics']['subscriberCount']
+            channelThumbnail = thumbnail_url
+            print(subscriberCount)
+        
+        # Rest of your code remains the same...
         finalVideoUrl = ''
         if not use_video_proxy:
             finalVideoUrlWithProxy = get_real_direct_video_url(video_id)
@@ -2214,6 +2258,7 @@ def get_ytvideo_info():
                 finalVideoUrlWithProxy = finalVideoUrl
                 if config['use_video_proxy'] and finalVideoUrl:
                     finalVideoUrlWithProxy = f"{config['mainurl']}video.proxy?url={quote(finalVideoUrl)}"
+        
         comments = []
         try:
             comments_resp = requests.get(f"https://www.googleapis.com/youtube/v3/commentThreads?key={apikey}&textFormat=plainText&part=snippet&videoId={video_id}&maxResults=25", timeout=config['request_timeout'])
@@ -2230,11 +2275,14 @@ def get_ytvideo_info():
                 })
         except Exception as e:
             print('Error loading comments:', e)
+        
         publishedAt = datetime.strptime(videoInfo['publishedAt'], '%Y-%m-%dT%H:%M:%SZ')
         publishedAtFormatted = publishedAt.strftime('%d.%m.%Y, %H:%M:%S')
+        
         result = {
             'title': videoInfo['title'],
             'author': videoInfo['channelTitle'],
+            'subscriberCount': subscriberCount,
             'description': videoInfo['description'],
             'video_id': video_id,
             'embed_url': f"https://www.youtube.com/embed/{video_id}",
@@ -2248,7 +2296,9 @@ def get_ytvideo_info():
             'thumbnail': f"{config['mainurl']}thumbnail/{video_id}",
             'video_url': finalVideoUrlWithProxy
         }
+        
         return jsonify(result)
+        
     except Exception as e:
         print('Error in get-ytvideo-info:', e)
         return jsonify({'error': 'Internal server error'})
@@ -2287,4 +2337,5 @@ def video_proxy():
         return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=2823)
+    # Запуск сервера в многопоточном режиме
+    app.run(host='0.0.0.0', port=2823, threaded=True)
