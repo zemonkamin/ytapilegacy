@@ -224,7 +224,6 @@ def get_real_direct_video_url(video_id):
         'format': 'best',
     }
     if config.get('use_cookies', True):
-        ydl_opts['cookiesfrombrowser'] = None
         ydl_opts['cookiefile'] = 'cookies.txt'
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1846,6 +1845,47 @@ def direct_url():
                         if (f.get('vcodec') and f.get('vcodec') != 'none') and (f.get('acodec') and f.get('acodec') != 'none')
                     ]
                     
+                    # Всегда пробовать прогрессивный сначала
+                    if progressive_candidates:
+                        # Сортировка: max height <= desired, prefer mp4
+                        def score_prog(f):
+                            height_match = 1 if (desired_height is None or f.get('height', 0) <= desired_height) else 0
+                            ext_score = 1 if f.get('ext') == 'mp4' else 0
+                            return (f.get('height', 0), height_match, ext_score)
+                        
+                        progressive_candidates.sort(key=score_prog, reverse=True)
+                        selected_progressive = progressive_candidates[0]
+                        
+                        if selected_progressive.get('url'):
+                            # Используем прогрессивный поток
+                            prog_url = selected_progressive['url']
+                            headers = {
+                                'Range': request.headers.get('Range', 'bytes=0-'),
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                            }
+                            resp = requests.get(prog_url, headers=headers, stream=True, timeout=config['request_timeout'])
+                            
+                            def generate_prog():
+                                mark_stream_start()
+                                try:
+                                    for chunk in resp.iter_content(chunk_size=8192):
+                                        if chunk:
+                                            yield chunk
+                                finally:
+                                    mark_stream_end()
+                            
+                            response = Response(generate_prog(), status=resp.status_code, mimetype='video/mp4')
+                            response.headers['Accept-Ranges'] = 'bytes'
+                            if 'content-range' in resp.headers:
+                                response.headers['Content-Range'] = resp.headers['content-range']
+                            if duration_value:
+                                duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
+                                response.headers['X-Content-Duration'] = duration_str
+                                response.headers['Content-Duration'] = duration_str
+                                response.headers['X-Video-Duration'] = duration_str
+                                response.headers['X-Duration-Seconds'] = duration_str
+                            return response
+                    
                     def score_progressive(f):
                         height = f.get('height') or 0
                         ext_score = 1 if f.get('ext') == 'mp4' else 0
@@ -1982,12 +2022,13 @@ def direct_url():
                     ffmpeg_cmd = [
                         'ffmpeg',
                         '-hide_banner',
-                        '-loglevel', 'error',
+                        '-loglevel', 'warning',  # Меньше спама, но видим warnings
                         '-nostdin',
                         '-reconnect', '1',
                         '-reconnect_streamed', '1',
                         '-reconnect_at_eof', '1',
-                        '-reconnect_delay_max', '10',
+                        '-reconnect_delay_max', '30',  # Увеличить таймаут
+                        '-fflags', '+genpts+igndts',  # Генерировать/игнорировать PTS для sync
                         '-user_agent', user_agent,
                         '-headers', common_headers,
                         '-i', video_url,
@@ -1999,7 +2040,9 @@ def direct_url():
                         '-c:v', 'copy',
                         '-c:a', 'aac',
                         '-b:a', '160k',
-                        '-movflags', 'frag_keyframe+empty_moov',
+                        '-flush_packets', '1',  # Flush буфер сразу (критично для стриминга)
+                        '-g', '30',  # Short GOP для фрагментации
+                        '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
                         '-f', 'mp4',
                         '-'
                     ]
@@ -2017,26 +2060,60 @@ def direct_url():
                                 line = ffmpeg_process.stderr.readline()
                                 if not line:
                                     break
+                                decoded = line.decode('utf-8', errors='ignore').strip()
+                                if decoded:
+                                    print(f"FFmpeg stderr: {decoded}")
+                                    # Если критическая ошибка, можно kill процесс
+                                    if any(err in decoded.lower() for err in ['error', 'failed', 'invalid']):
+                                        print("Critical FFmpeg error detected")
                         except Exception:
                             pass
                     threading.Thread(target=_drain_stderr, daemon=True).start()
 
                     def generate():
                         mark_stream_start()
+                        fallback_used = False
                         try:
                             while True:
+                                if ffmpeg_process.poll() is not None:  # FFmpeg завершился
+                                    exit_code = ffmpeg_process.poll()
+                                    if exit_code != 0:
+                                        print(f"FFmpeg exited with code {exit_code} - fallback to simple proxy")
+                                        # Fallback: простой прокси видео без аудио (или best)
+                                        fallback_url = get_direct_video_url(video_id, quality=None)  # Без качества, чтобы не сломать
+                                        if fallback_url:
+                                            fallback_resp = requests.get(fallback_url, stream=True, timeout=30)
+                                            for chunk in fallback_resp.iter_content(chunk_size=8192):
+                                                if chunk:
+                                                    yield chunk
+                                            fallback_used = True
+                                        break
+                                    else:
+                                        break  # Нормальный конец
                                 chunk = ffmpeg_process.stdout.read(65536)
                                 if not chunk:
                                     break
                                 yield chunk
+                        except Exception as e:
+                            print(f"Error in generate(): {e}")
+                            if not fallback_used:
+                                # Emergency fallback
+                                fallback_url = get_direct_video_url(video_id)
+                                if fallback_url:
+                                    fallback_resp = requests.get(fallback_url, stream=True, timeout=30)
+                                    for chunk in fallback_resp.iter_content(chunk_size=8192):
+                                        if chunk:
+                                            yield chunk
                         finally:
                             try:
                                 ffmpeg_process.terminate()
+                                ffmpeg_process.wait(timeout=5)  # Ждать завершения
                             except Exception:
                                 pass
                             mark_stream_end()
 
                     response = Response(generate(), mimetype='video/mp4')
+                    response.headers['Transfer-Encoding'] = 'chunked'  # Для правильного стриминга
                     if duration_value:
                         duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
                         response.headers['X-Content-Duration'] = duration_str
@@ -2282,6 +2359,39 @@ def download_video():
                         if (f.get('vcodec') and f.get('vcodec') != 'none') and (f.get('acodec') and f.get('acodec') != 'none')
                     ]
                     
+                    # Всегда пробовать прогрессивный сначала
+                    if progressive_candidates:
+                        # Сортировка: max height <= desired, prefer mp4
+                        def score_prog(f):
+                            height_match = 1 if (desired_height is None or f.get('height', 0) <= desired_height) else 0
+                            ext_score = 1 if f.get('ext') == 'mp4' else 0
+                            return (f.get('height', 0), height_match, ext_score)
+                        
+                        progressive_candidates.sort(key=score_prog, reverse=True)
+                        selected_progressive = progressive_candidates[0]
+                        
+                        if selected_progressive.get('url'):
+                            # Используем прогрессивный поток
+                            prog_url = selected_progressive['url']
+                            headers = {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                            }
+                            resp = requests.get(prog_url, headers=headers, stream=True, timeout=config['request_timeout'])
+                            
+                            def generate_prog():
+                                mark_stream_start()
+                                try:
+                                    for chunk in resp.iter_content(chunk_size=8192):
+                                        if chunk:
+                                            yield chunk
+                                finally:
+                                    mark_stream_end()
+                            
+                            response = Response(generate_prog(), mimetype='video/mp4')
+                            response.headers['Content-Disposition'] = f'attachment; filename="{video_title}.mp4"'
+                            response.headers['Transfer-Encoding'] = 'chunked'  # Для правильного стриминга
+                            return response
+                    
                     def score_progressive(f):
                         height = f.get('height') or 0
                         ext_score = 1 if f.get('ext') == 'mp4' else 0
@@ -2319,6 +2429,7 @@ def download_video():
                         
                         response = Response(generate_prog(), mimetype='video/mp4')
                         response.headers['Content-Disposition'] = f'attachment; filename="{video_title}.mp4"'
+                        response.headers['Transfer-Encoding'] = 'chunked'  # Для правильного стриминга
                         return response
 
                     # Если прогрессивный поток не найден, комбинируем видео и аудио через FFmpeg
@@ -2403,12 +2514,13 @@ def download_video():
                     ffmpeg_cmd = [
                         'ffmpeg',
                         '-hide_banner',
-                        '-loglevel', 'error',
+                        '-loglevel', 'warning',  # Меньше спама, но видим warnings
                         '-nostdin',
                         '-reconnect', '1',
                         '-reconnect_streamed', '1',
                         '-reconnect_at_eof', '1',
-                        '-reconnect_delay_max', '10',
+                        '-reconnect_delay_max', '30',  # Увеличить таймаут
+                        '-fflags', '+genpts+igndts',  # Генерировать/игнорировать PTS для sync
                         '-user_agent', user_agent,
                         '-headers', common_headers,
                         '-i', video_url,
@@ -2420,7 +2532,9 @@ def download_video():
                         '-c:v', 'copy',
                         '-c:a', 'aac',
                         '-b:a', '160k',
-                        '-movflags', 'frag_keyframe+empty_moov',
+                        '-flush_packets', '1',  # Flush буфер сразу (критично для стриминга)
+                        '-g', '30',  # Short GOP для фрагментации
+                        '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
                         '-f', 'mp4',
                         '-'
                     ]
@@ -2444,21 +2558,49 @@ def download_video():
 
                     def generate():
                         mark_stream_start()
+                        fallback_used = False
                         try:
                             while True:
+                                if ffmpeg_process.poll() is not None:  # FFmpeg завершился
+                                    exit_code = ffmpeg_process.poll()
+                                    if exit_code != 0:
+                                        print(f"FFmpeg exited with code {exit_code} - fallback to simple proxy")
+                                        # Fallback: простой прокси видео без аудио (или best)
+                                        fallback_url = get_direct_video_url(video_id, quality=None)  # Без качества, чтобы не сломать
+                                        if fallback_url:
+                                            fallback_resp = requests.get(fallback_url, stream=True, timeout=30)
+                                            for chunk in fallback_resp.iter_content(chunk_size=8192):
+                                                if chunk:
+                                                    yield chunk
+                                            fallback_used = True
+                                        break
+                                    else:
+                                        break  # Нормальный конец
                                 chunk = ffmpeg_process.stdout.read(65536)
                                 if not chunk:
                                     break
                                 yield chunk
+                        except Exception as e:
+                            print(f"Error in generate(): {e}")
+                            if not fallback_used:
+                                # Emergency fallback
+                                fallback_url = get_direct_video_url(video_id)
+                                if fallback_url:
+                                    fallback_resp = requests.get(fallback_url, stream=True, timeout=30)
+                                    for chunk in fallback_resp.iter_content(chunk_size=8192):
+                                        if chunk:
+                                            yield chunk
                         finally:
                             try:
                                 ffmpeg_process.terminate()
+                                ffmpeg_process.wait(timeout=5)  # Ждать завершения
                             except Exception:
                                 pass
                             mark_stream_end()
 
                     response = Response(generate(), mimetype='video/mp4')
                     response.headers['Content-Disposition'] = f'attachment; filename="{video_title}.mp4"'
+                    response.headers['Transfer-Encoding'] = 'chunked'  # Для правильного стриминга
                     return response
 
             except Exception as e:
