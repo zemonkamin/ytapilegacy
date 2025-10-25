@@ -7,7 +7,7 @@ import re
 from urllib.parse import quote
 from datetime import datetime
 from utils.video_processing import get_direct_video_url, get_real_direct_video_url, get_video_url
-from utils.helpers import run_yt_dlp, get_channel_thumbnail, get_proxy_url, get_video_proxy_url
+from utils.helpers import run_yt_dlp, get_channel_thumbnail, get_proxy_url, get_video_proxy_url, get_api_key, get_api_key_rotated
 from utils.auth import refresh_access_token
 
 # Create blueprint
@@ -168,7 +168,7 @@ def setup_additional_routes(config):
             }
             
             params = {
-                "key": config.get('api_key'),
+                "key": get_api_key_rotated(config),
                 'prettyPrint': 'false'
             }
             
@@ -231,7 +231,7 @@ def setup_additional_routes(config):
         try:
             video_id = request.args.get('video_id')
             count = int(request.args.get('count', str(config.get('default_count', 50))))
-            apikey = request.args.get('apikey', config['api_key'])
+            apikey = get_api_key_rotated(config)
             refresh_token = request.args.get('token')  # Новый параметр для токена
 
             if not video_id:
@@ -278,11 +278,15 @@ def setup_additional_routes(config):
                 except:
                     viewCount = '0'
                 
+                # Extract publication date
+                publishedAt = vinfo.get('publishedAt', '')
+                
                 relatedVideos.append({
                     'title': vinfo['title'],
                     'author': vinfo['channelTitle'],
                     'video_id': vid,
                     'views': viewCount,
+                    'published_at': publishedAt,
                     'thumbnail': f"{config['mainurl']}thumbnail/{vid}",
                     'channel_thumbnail': get_proxy_url(channelThumbnail, config['use_channel_thumbnail_proxy']),
                     'url': get_video_proxy_url(f"{config['mainurl']}get-ytvideo-info.php?video_id={vid}&quality={config['default_quality']}", config['use_video_proxy']),
@@ -337,6 +341,7 @@ def setup_additional_routes(config):
                                     'author': rec_video.get('author', 'Unknown'),
                                     'video_id': vid,
                                     'views': viewCount,
+                                    'published_at': '',  # InnerTube recommendations don't have published date in this format
                                     'thumbnail': f"{config['mainurl']}thumbnail/{vid}",
                                     'channel_thumbnail': get_proxy_url(channel_thumb, config['use_channel_thumbnail_proxy']),
                                     'url': get_video_proxy_url(f"{config['mainurl']}get-ytvideo-info.php?video_id={vid}&quality={config['default_quality']}", config['use_video_proxy']),
@@ -448,7 +453,7 @@ def get_innertube_recommendations(access_token, max_count, config):
         }
         
         params = {
-            "key": config.get('api_key', "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"),
+            "key": get_api_key_rotated(config),
             "prettyPrint": "false"
         }
         
@@ -503,7 +508,7 @@ def fetch_history_page(access_token, continuation_token, config):
         payload["continuation"] = continuation_token
     
     params = {
-        "key": config.get('api_key'),
+        "key": get_api_key_rotated(config),
         "prettyPrint": "false"
     }
     

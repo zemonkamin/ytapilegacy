@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify, redirect
 import requests
 from urllib.parse import quote
-from utils.helpers import get_channel_thumbnail, get_proxy_url
+from utils.helpers import get_channel_thumbnail, get_proxy_url, get_api_key, get_api_key_rotated, replace_youtube_thumbnail_domain
 
 # Create blueprint
 channel_bp = Blueprint('channel', __name__)
@@ -14,7 +14,7 @@ def setup_channel_routes(config):
         try:
             author = request.args.get('author')
             count = request.args.get('count', '50')
-            apikey = request.args.get('apikey', config['api_key'])
+            apikey = get_api_key_rotated(config)
 
             if not author:
                 return jsonify({'error': 'Author parameter is required'})
@@ -37,7 +37,7 @@ def setup_channel_routes(config):
         try:
             channel_id = request.args.get('channel_id')
             count = int(request.args.get('count', str(config.get('default_count', 50))))
-            apikey = request.args.get('apikey', config['api_key'])
+            apikey = get_api_key_rotated(config)
 
             if not channel_id:
                 return jsonify({'error': 'Channel ID parameter is required'})
@@ -74,7 +74,7 @@ def setup_channel_routes(config):
                             'author': channel_info['snippet']['title'],
                             'video_id': videoId,
                             'thumbnail': f"{config['mainurl']}thumbnail/{videoId}",
-                            'channel_thumbnail': get_proxy_url(channelThumbnail, config['use_channel_thumbnail_proxy']),
+                            'channel_thumbnail': replace_youtube_thumbnail_domain(get_proxy_url(channelThumbnail, config['use_channel_thumbnail_proxy'])),
                         })
                         totalVideos += 1
                 nextPageToken = videos_data.get('nextPageToken', '')
@@ -85,8 +85,8 @@ def setup_channel_routes(config):
                 'channel_info': {
                     'title': channel_info['snippet']['title'],
                     'description': channel_info['snippet']['description'],
-                    'thumbnail': get_proxy_url(channel_info['snippet']['thumbnails']['high']['url'], config['use_channel_thumbnail_proxy']),
-                    'banner': get_proxy_url(channel_info.get('brandingSettings', {}).get('image', {}).get('bannerExternalUrl', ''), config['use_thumbnail_proxy']),
+                    'thumbnail': replace_youtube_thumbnail_domain(get_proxy_url(channel_info['snippet']['thumbnails']['high']['url'], config['use_channel_thumbnail_proxy'])),
+                    'banner': replace_youtube_thumbnail_domain(get_proxy_url(channel_info.get('brandingSettings', {}).get('image', {}).get('bannerExternalUrl', ''), config['use_thumbnail_proxy'])),
                     'subscriber_count': channel_info['statistics']['subscriberCount'],
                     'video_count': channel_info['statistics']['videoCount']
                 },
@@ -101,7 +101,7 @@ def setup_channel_routes(config):
     def get_channel_thumbnail_api():
         try:
             video_id = request.args.get('video_id')
-            apikey = request.args.get('apikey', config['api_key'])
+            apikey = get_api_key_rotated(config)
 
             if not video_id:
                 return jsonify({'error': 'ID видео не был передан.'})

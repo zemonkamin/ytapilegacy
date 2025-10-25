@@ -6,6 +6,11 @@ import re
 from urllib.parse import quote
 from datetime import datetime
 import random
+import threading
+
+# Global counter for API key rotation
+_api_key_counter = 0
+_api_key_lock = threading.Lock()
 
 # We'll need to pass config to this function or import it
 # For now, we'll modify the function signature to accept config
@@ -162,6 +167,12 @@ def url_exists(url):
         print('url_exists error:', e)
         return False
 
+def replace_youtube_thumbnail_domain(url):
+    """Replace yt3.ggpht.com domain with yt3.googleusercontent.com for better reliability"""
+    if not url:
+        return url
+    return url.replace('https://yt3.ggpht.com', 'https://yt3.googleusercontent.com')
+
 def get_channel_thumbnail(channel_id, api_key, config):
     """Get channel thumbnail with multiple fallback methods"""
     if not config.get('fetch_channel_thumbnails', False):
@@ -185,7 +196,8 @@ def get_channel_thumbnail(channel_id, api_key, config):
             channel_snippet = data['items'][0]['snippet']
             thumbnail_url = channel_snippet['thumbnails']['default']['url']
             print(f"DEBUG: Found channel thumbnail: {thumbnail_url}")
-            return thumbnail_url
+            # Replace domain for better reliability
+            return replace_youtube_thumbnail_domain(thumbnail_url)
         else:
             print("DEBUG: No items in API response")
                 
@@ -193,4 +205,41 @@ def get_channel_thumbnail(channel_id, api_key, config):
         print(f'Error getting channel thumbnail from API for {channel_id}: {e}')
     
     # Fallback
-    return 'https://yt3.ggpht.com/a/default-user=s88-c-k-c0x00ffffff-no-rj'
+    return replace_youtube_thumbnail_domain('https://yt3.ggpht.com/a/default-user=s88-c-k-c0x00ffffff-no-rj')
+
+def get_api_key(config, request_args=None):
+    """Get API key from request parameters or config.
+    
+    If apikey parameter is provided in request, use it.
+    Otherwise, select an API key from the config's api_keys list with rotation.
+    """
+    # Check if apikey is provided in request parameters
+    if request_args and 'apikey' in request_args and request_args['apikey']:
+        print(f"Using API key from request parameter: {request_args['apikey']}")
+        return request_args['apikey']
+    
+    # If no apikey in request, use one from config with rotation
+    return get_api_key_rotated(config)
+
+def get_api_key_rotated(config):
+    """Get an API key from the config's api_keys list with rotation.
+    
+    This function rotates through the available API keys to distribute the load.
+    """
+    global _api_key_counter, _api_key_lock
+    
+    api_keys = config.get('api_keys', [])
+    if not api_keys:
+        # Fallback to old config format
+        return get_api_key_rotated(config)
+    
+    # Thread-safe increment and selection
+    with _api_key_lock:
+        index = _api_key_counter % len(api_keys)
+        key = api_keys[index]
+        _api_key_counter += 1
+    
+    # Log which API key is being used
+    print(f"Using API key at index {index}: {key}")
+    
+    return key
