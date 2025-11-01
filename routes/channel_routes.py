@@ -63,6 +63,21 @@ def setup_channel_routes(config):
                 videos_data = videos_resp.json()
 
                 if videos_data.get('items'):
+                    # Get video IDs for batch statistics request
+                    video_ids = [video['id']['videoId'] for video in videos_data['items'][:count-totalVideos]]
+                    video_ids_str = ','.join(video_ids)
+                    
+                    # Get video statistics (views, etc.)
+                    stats_resp = requests.get(f"https://www.googleapis.com/youtube/v3/videos?part=statistics&id={video_ids_str}&key={apikey}", timeout=config['request_timeout'])
+                    stats_resp.raise_for_status()
+                    stats_data = stats_resp.json()
+                    
+                    # Create a map of video ID to view count
+                    view_counts = {}
+                    if stats_data.get('items'):
+                        for item in stats_data['items']:
+                            view_counts[item['id']] = item['statistics'].get('viewCount', '0')
+
                     for video in videos_data['items']:
                         if totalVideos >= count:
                             break
@@ -75,6 +90,8 @@ def setup_channel_routes(config):
                             'video_id': videoId,
                             'thumbnail': f"{config['mainurl']}thumbnail/{videoId}",
                             'channel_thumbnail': replace_youtube_thumbnail_domain(get_proxy_url(channelThumbnail, config['use_channel_thumbnail_proxy'])),
+                            'views': view_counts.get(videoId, '0'),
+                            'published_at': videoInfo.get('publishedAt', '')
                         })
                         totalVideos += 1
                 nextPageToken = videos_data.get('nextPageToken', '')
