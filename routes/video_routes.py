@@ -1132,9 +1132,38 @@ def setup_video_routes(config):
             print('Error in /thumbnail:', e)
             return '', 404
 
-    @video_bp.route('/channel_icon/<video_id>')
+    @video_bp.route('/channel_icon/<path:video_id>')
     def channel_icon(video_id):
         try:
+            # Check if the video_id is actually a direct image URL
+            if video_id.startswith('http'):
+                # It's a direct URL, proxy it directly
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                
+                # Proxy the image directly
+                try:
+                    image_resp = requests.get(video_id, timeout=30, headers=headers)
+                    image_resp.raise_for_status()
+                    
+                    return Response(
+                        image_resp.content,
+                        mimetype=image_resp.headers.get('content-type', 'image/jpeg'),
+                        headers={'Cache-Control': 'public, max-age=3600'}  # Cache for 1 hour
+                    )
+                except requests.exceptions.SSLError as ssl_error:
+                    print(f'SSL Error fetching image: {ssl_error}')
+                    # Try again without SSL verification as a fallback
+                    image_resp = requests.get(video_id, timeout=30, headers=headers, verify=False)
+                    image_resp.raise_for_status()
+                    
+                    return Response(
+                        image_resp.content,
+                        mimetype=image_resp.headers.get('content-type', 'image/jpeg'),
+                        headers={'Cache-Control': 'public, max-age=3600'}  # Cache for 1 hour
+                    )
+            
             # Get API key from config or request parameters
             apikey = get_api_key_rotated(config)
             # Get quality parameter, default to 'default' if not provided
