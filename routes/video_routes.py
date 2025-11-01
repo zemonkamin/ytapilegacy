@@ -1132,169 +1132,201 @@ def setup_video_routes(config):
             print('Error in /thumbnail:', e)
             return '', 404
 
-    @video_bp.route('/channel_icon/<video_id>')
+    @video_bp.route('/channel_icon/<path:video_id>')
     def channel_icon(video_id):
         try:
-            # Get API key from config or request parameters
-            apikey = get_api_key_rotated(config)
-            # Get quality parameter, default to 'default' if not provided
-            # This ensures that when no quality is specified, we use 'default' quality (not 'high')
-            quality = request.args.get('quality', 'default')
-            
-            # API key is now optional since we can use keys from config
-            # But we still need to check if we have a key to use
-            if not apikey:
-                return jsonify({'error': 'API key is required'}), 400
-            
-            # Check if the provided ID is a channel ID (starts with UC) or video ID
-            if video_id.startswith('UC'):
-                # It's a channel ID, use it directly
-                channel_id = video_id
-            elif video_id.startswith('@'):
-                # It's a channel username (starts with @), search for the channel
-                username = video_id[1:]  # Remove the @ prefix
-                search_url = f"https://www.googleapis.com/youtube/v3/channels?forUsername={username}&key={apikey}&part=id"
-                search_resp = requests.get(search_url, timeout=config['request_timeout'])
+            # Check if video_id is already a direct image URL (starts with http or https)
+            if video_id.startswith('http://') or video_id.startswith('https://'):
+                # Proxy the image directly
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
                 
-                # Check if the response is successful
-                if search_resp.status_code != 200:
-                    error_msg = f"Failed to search channel by username: {search_resp.status_code}"
-                    if search_resp.text:
-                        error_msg += f" - {search_resp.text}"
-                    print(error_msg)
-                    return jsonify({'error': 'Failed to search channel by username'}), 500
+                # Proxy the image
+                try:
+                    image_resp = requests.get(video_id, timeout=30, headers=headers)
+                    image_resp.raise_for_status()
+                    
+                    return Response(
+                        image_resp.content,
+                        mimetype=image_resp.headers.get('content-type', 'image/jpeg'),
+                        headers={'Cache-Control': 'public, max-age=3600'}  # Cache for 1 hour
+                    )
+                except requests.exceptions.SSLError as ssl_error:
+                    print(f'SSL Error fetching image: {ssl_error}')
+                    # Try again without SSL verification as a fallback
+                    image_resp = requests.get(video_id, timeout=30, headers=headers, verify=False)
+                    image_resp.raise_for_status()
+                    
+                    return Response(
+                        image_resp.content,
+                        mimetype=image_resp.headers.get('content-type', 'image/jpeg'),
+                        headers={'Cache-Control': 'public, max-age=3600'}  # Cache for 1 hour
+                    )
+                except Exception as e:
+                    print(f'Error fetching direct image: {e}')
+                    return jsonify({'error': 'Failed to fetch direct image'}), 500
+            else:
+                # Handle as YouTube channel ID
+                # Get API key from config or request parameters
+                apikey = get_api_key_rotated(config)
+                # Get quality parameter, default to 'default' if not provided
+                # This ensures that when no quality is specified, we use 'default' quality (not 'high')
+                quality = request.args.get('quality', 'default')
                 
-                search_data = search_resp.json()
+                # API key is now optional since we can use keys from config
+                # But we still need to check if we have a key to use
+                if not apikey:
+                    return jsonify({'error': 'API key is required'}), 400
                 
-                if not search_data.get('items'):
-                    # Try searching by custom URL instead
-                    search_url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={username}&type=channel&key={apikey}"
+                # Check if the provided ID is a channel ID (starts with UC) or video ID
+                if video_id.startswith('UC'):
+                    # It's a channel ID, use it directly
+                    channel_id = video_id
+                elif video_id.startswith('@'):
+                    # It's a channel username (starts with @), search for the channel
+                    username = video_id[1:]  # Remove the @ prefix
+                    search_url = f"https://www.googleapis.com/youtube/v3/channels?forUsername={username}&key={apikey}&part=id"
                     search_resp = requests.get(search_url, timeout=config['request_timeout'])
                     
+                    # Check if the response is successful
                     if search_resp.status_code != 200:
-                        error_msg = f"Failed to search channel by name: {search_resp.status_code}"
+                        error_msg = f"Failed to search channel by username: {search_resp.status_code}"
                         if search_resp.text:
                             error_msg += f" - {search_resp.text}"
                         print(error_msg)
-                        return jsonify({'error': 'Failed to search channel by name'}), 500
+                        return jsonify({'error': 'Failed to search channel by username'}), 500
                     
                     search_data = search_resp.json()
                     
                     if not search_data.get('items'):
-                        return jsonify({'error': 'Channel not found'}), 404
-                    
-                    # Extract channel ID from search results (search API format)
-                    if search_data.get('items') and len(search_data['items']) > 0:
-                        channel_id = search_data['items'][0]['snippet']['channelId']
+                        # Try searching by custom URL instead
+                        search_url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={username}&type=channel&key={apikey}"
+                        search_resp = requests.get(search_url, timeout=config['request_timeout'])
+                        
+                        if search_resp.status_code != 200:
+                            error_msg = f"Failed to search channel by name: {search_resp.status_code}"
+                            if search_resp.text:
+                                error_msg += f" - {search_resp.text}"
+                            print(error_msg)
+                            return jsonify({'error': 'Failed to search channel by name'}), 500
+                        
+                        search_data = search_resp.json()
+                        
+                        if not search_data.get('items'):
+                            return jsonify({'error': 'Channel not found'}), 404
+                        
+                        # Extract channel ID from search results (search API format)
+                        if search_data.get('items') and len(search_data['items']) > 0:
+                            channel_id = search_data['items'][0]['snippet']['channelId']
+                        else:
+                            return jsonify({'error': 'Channel not found'}), 404
                     else:
-                        return jsonify({'error': 'Channel not found'}), 404
+                        # Extract channel ID from channels API results
+                        if search_data.get('items') and len(search_data['items']) > 0:
+                            channel_id = search_data['items'][0]['id']
+                        else:
+                            return jsonify({'error': 'Channel not found'}), 404
                 else:
-                    # Extract channel ID from channels API results
-                    if search_data.get('items') and len(search_data['items']) > 0:
-                        channel_id = search_data['items'][0]['id']
-                    else:
-                        return jsonify({'error': 'Channel not found'}), 404
-            else:
-                # It's a video ID, get the channel ID from video information
-                video_url = f"https://www.googleapis.com/youtube/v3/videos?id={video_id}&key={apikey}&part=snippet"
-                video_resp = requests.get(video_url, timeout=config['request_timeout'])
+                    # It's a video ID, get the channel ID from video information
+                    video_url = f"https://www.googleapis.com/youtube/v3/videos?id={video_id}&key={apikey}&part=snippet"
+                    video_resp = requests.get(video_url, timeout=config['request_timeout'])
+                    
+                    # Check if the response is successful
+                    if video_resp.status_code != 200:
+                        error_msg = f"Failed to fetch video info: {video_resp.status_code}"
+                        if video_resp.text:
+                            error_msg += f" - {video_resp.text}"
+                        print(error_msg)
+                        return jsonify({'error': 'Failed to fetch video information'}), 500
+                    
+                    video_data = video_resp.json()
+                    
+                    if not video_data.get('items'):
+                        return jsonify({'error': 'Video not found'}), 404
+                    
+                    # Extract channel ID from video data
+                    channel_id = video_data['items'][0]['snippet']['channelId']
+                
+                # Get channel information to retrieve thumbnail
+                channel_url = f"https://www.googleapis.com/youtube/v3/channels?id={channel_id}&key={apikey}&part=snippet"
+                channel_resp = requests.get(channel_url, timeout=config['request_timeout'])
                 
                 # Check if the response is successful
-                if video_resp.status_code != 200:
-                    error_msg = f"Failed to fetch video info: {video_resp.status_code}"
-                    if video_resp.text:
-                        error_msg += f" - {video_resp.text}"
+                if channel_resp.status_code != 200:
+                    error_msg = f"Failed to fetch channel info: {channel_resp.status_code}"
+                    if channel_resp.text:
+                        error_msg += f" - {channel_resp.text}"
                     print(error_msg)
-                    return jsonify({'error': 'Failed to fetch video information'}), 500
+                    return jsonify({'error': 'Failed to fetch channel information'}), 500
                 
-                video_data = video_resp.json()
+                channel_data = channel_resp.json()
                 
-                if not video_data.get('items'):
-                    return jsonify({'error': 'Video not found'}), 404
+                if not channel_data.get('items'):
+                    return jsonify({'error': 'Channel not found'}), 404
                 
-                # Extract channel ID from video data
-                channel_id = video_data['items'][0]['snippet']['channelId']
-            
-            # Get channel information to retrieve thumbnail
-            channel_url = f"https://www.googleapis.com/youtube/v3/channels?id={channel_id}&key={apikey}&part=snippet"
-            channel_resp = requests.get(channel_url, timeout=config['request_timeout'])
-            
-            # Check if the response is successful
-            if channel_resp.status_code != 200:
-                error_msg = f"Failed to fetch channel info: {channel_resp.status_code}"
-                if channel_resp.text:
-                    error_msg += f" - {channel_resp.text}"
-                print(error_msg)
-                return jsonify({'error': 'Failed to fetch channel information'}), 500
-            
-            channel_data = channel_resp.json()
-            
-            if not channel_data.get('items'):
-                return jsonify({'error': 'Channel not found'}), 404
-            
-            # Extract thumbnail URL based on quality parameter
-            thumbnails = channel_data['items'][0]['snippet']['thumbnails']
-            
-            # Map quality parameters to thumbnail URLs
-            quality_map = {
-                'default': 'default',
-                'medium': 'medium',
-                'high': 'high'
-            }
-            
-            # Use the requested quality, or 'default' if not provided/invalid
-            thumbnail_quality = quality_map.get(quality, 'default')
-            
-            # Check if the requested quality is available, if not fall back in order
-            # When no quality is specified, we prefer 'default' over 'high' as the first fallback
-            if thumbnail_quality not in thumbnails:
-                # Try in order: requested quality -> default -> medium -> high
-                fallback_order = [thumbnail_quality, 'default', 'medium', 'high']
-                for q in fallback_order:
-                    if q in thumbnails:
-                        thumbnail_quality = q
-                        break
-                else:
-                    # If none of the fallback options are available, use any available thumbnail
-                    if thumbnails:
-                        thumbnail_quality = list(thumbnails.keys())[0]
+                # Extract thumbnail URL based on quality parameter
+                thumbnails = channel_data['items'][0]['snippet']['thumbnails']
+                
+                # Map quality parameters to thumbnail URLs
+                quality_map = {
+                    'default': 'default',
+                    'medium': 'medium',
+                    'high': 'high'
+                }
+                
+                # Use the requested quality, or 'default' if not provided/invalid
+                thumbnail_quality = quality_map.get(quality, 'default')
+                
+                # Check if the requested quality is available, if not fall back in order
+                # When no quality is specified, we prefer 'default' over 'high' as the first fallback
+                if thumbnail_quality not in thumbnails:
+                    # Try in order: requested quality -> default -> medium -> high
+                    fallback_order = [thumbnail_quality, 'default', 'medium', 'high']
+                    for q in fallback_order:
+                        if q in thumbnails:
+                            thumbnail_quality = q
+                            break
                     else:
-                        return jsonify({'error': 'Channel thumbnail not available'}), 404
-            
-            thumbnail_url = thumbnails[thumbnail_quality]['url']
-            
-            # Replace yt3.ggpht.com with yt3.googleusercontent.com to avoid SSL issues
-            # As per project memory, googleusercontent.com is more reliable
-            if 'yt3.ggpht.com' in thumbnail_url:
-                thumbnail_url = thumbnail_url.replace('yt3.ggpht.com', 'yt3.googleusercontent.com')
-            
-            # Add headers to mimic a browser request
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            
-            # Proxy the thumbnail image
-            try:
-                thumbnail_resp = requests.get(thumbnail_url, timeout=30, headers=headers)
-                thumbnail_resp.raise_for_status()
+                        # If none of the fallback options are available, use any available thumbnail
+                        if thumbnails:
+                            thumbnail_quality = list(thumbnails.keys())[0]
+                        else:
+                            return jsonify({'error': 'Channel thumbnail not available'}), 404
                 
-                return Response(
-                    thumbnail_resp.content,
-                    mimetype=thumbnail_resp.headers.get('content-type', 'image/jpeg'),
-                    headers={'Cache-Control': 'public, max-age=3600'}  # Cache for 1 hour
-                )
-            except requests.exceptions.SSLError as ssl_error:
-                print(f'SSL Error fetching thumbnail: {ssl_error}')
-                # Try again without SSL verification as a fallback
-                thumbnail_resp = requests.get(thumbnail_url, timeout=30, headers=headers, verify=False)
-                thumbnail_resp.raise_for_status()
+                thumbnail_url = thumbnails[thumbnail_quality]['url']
                 
-                return Response(
-                    thumbnail_resp.content,
-                    mimetype=thumbnail_resp.headers.get('content-type', 'image/jpeg'),
-                    headers={'Cache-Control': 'public, max-age=3600'}  # Cache for 1 hour
-                )
-            
+                # Replace yt3.ggpht.com with yt3.googleusercontent.com to avoid SSL issues
+                # As per project memory, googleusercontent.com is more reliable
+                if 'yt3.ggpht.com' in thumbnail_url:
+                    thumbnail_url = thumbnail_url.replace('yt3.ggpht.com', 'yt3.googleusercontent.com')
+                
+                # Add headers to mimic a browser request
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                
+                # Proxy the thumbnail image
+                try:
+                    thumbnail_resp = requests.get(thumbnail_url, timeout=30, headers=headers)
+                    thumbnail_resp.raise_for_status()
+                    
+                    return Response(
+                        thumbnail_resp.content,
+                        mimetype=thumbnail_resp.headers.get('content-type', 'image/jpeg'),
+                        headers={'Cache-Control': 'public, max-age=3600'}  # Cache for 1 hour
+                    )
+                except requests.exceptions.SSLError as ssl_error:
+                    print(f'SSL Error fetching thumbnail: {ssl_error}')
+                    # Try again without SSL verification as a fallback
+                    thumbnail_resp = requests.get(thumbnail_url, timeout=30, headers=headers, verify=False)
+                    thumbnail_resp.raise_for_status()
+                    
+                    return Response(
+                        thumbnail_resp.content,
+                        mimetype=thumbnail_resp.headers.get('content-type', 'image/jpeg'),
+                        headers={'Cache-Control': 'public, max-age=3600'}  # Cache for 1 hour
+                    )
         except requests.exceptions.RequestException as e:
             print(f'Error fetching channel icon: {e}')
             return jsonify({'error': f'Failed to fetch channel icon: {str(e)}'}), 500

@@ -85,8 +85,8 @@ def setup_channel_routes(config):
                 'channel_info': {
                     'title': channel_info['snippet']['title'],
                     'description': channel_info['snippet']['description'],
-                    'thumbnail': replace_youtube_thumbnail_domain(get_proxy_url(channel_info['snippet']['thumbnails']['high']['url'], config['use_channel_thumbnail_proxy'])),
-                    'banner': replace_youtube_thumbnail_domain(get_proxy_url(channel_info.get('brandingSettings', {}).get('image', {}).get('bannerExternalUrl', ''), config['use_thumbnail_proxy'])),
+                    'thumbnail': f"{config['mainurl']}channel_icon/{replace_youtube_thumbnail_domain(get_proxy_url(channel_info['snippet']['thumbnails']['high']['url'], config['use_channel_thumbnail_proxy']))}",
+                    'banner': f"{config['mainurl']}channel_icon/{replace_youtube_thumbnail_domain(get_proxy_url(channel_info.get('brandingSettings', {}).get('image', {}).get('bannerExternalUrl', ''), config['use_thumbnail_proxy']))}",
                     'subscriber_count': channel_info['statistics']['subscriberCount'],
                     'video_count': channel_info['statistics']['videoCount']
                 },
