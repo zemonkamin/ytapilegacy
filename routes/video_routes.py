@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, redirect
 import json
 import requests
 import subprocess
@@ -130,12 +130,34 @@ def setup_video_routes(config):
         try:
             video_id = request.args.get('video_id')
             quality = request.args.get('quality')
+            proxy_param = request.args.get('proxy', 'true').lower()
+            use_proxy = proxy_param != 'false'
             
             if not video_id:
                 response = jsonify({'error': 'ID видео не был передан.'})
                 response.status_code = 400
                 response.headers['Content-Length'] = str(len(response.get_data()))
                 return response
+
+            # If proxy=false, redirect to the original video URL
+            if not use_proxy:
+                try:
+                    # Get the original video URL without proxying
+                    video_url = get_real_direct_video_url(video_id)
+                    if video_url:
+                        # Redirect to the original URL
+                        return redirect(video_url)
+                    else:
+                        response = jsonify({'error': 'Не удалось получить прямую ссылку на видео.'})
+                        response.status_code = 500
+                        response.headers['Content-Length'] = str(len(response.get_data()))
+                        return response
+                except Exception as e:
+                    print(f'Error getting original video URL: {e}')
+                    response = jsonify({'error': f'Internal server error: {str(e)}'})
+                    response.status_code = 500
+                    response.headers['Content-Length'] = str(len(response.get_data()))
+                    return response
 
             # Increment view count for this video
             if video_id:
