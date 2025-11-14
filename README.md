@@ -31,11 +31,6 @@ pip install flask flask-cors yt-dlp google-auth google-auth-oauthlib google-api-
 
 <hr>
 
-# The code will be updated
-It is planned to log in to the account and receive personal recommendations, as well as subscriptions.
-
-<hr>
-
 Screenshots of the client using this API:
 
 <img src="screenshots/yt1.jpg" width=40%><img src="screenshots/yt2.jpg" width=40%>
