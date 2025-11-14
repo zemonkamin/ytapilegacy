@@ -33,6 +33,6 @@ pip install flask flask-cors yt-dlp google-auth google-auth-oauthlib google-api-
 
 Screenshots of the client using this API:
 
-<img src="screenshots/yt1.jpg" width=40%><img src="screenshots/yt2.jpg" width=40%>
+<img src="screenshots/yt1.png" width=40%><img src="screenshots/yt2.png" width=40%>
 <br>
-<img src="screenshots/yt3.jpg" width=40%><img src="screenshots/yt4.jpg" width=40%>
+<img src="screenshots/yt3.png" width=40%><img src="screenshots/yt4.png" width=40%>
