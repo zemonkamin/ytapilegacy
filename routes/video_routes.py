@@ -7,7 +7,7 @@ import os
 import re
 from urllib.parse import quote
 from datetime import datetime
-from utils.video_processing import get_direct_video_url, get_real_direct_video_url, get_video_url, get_video_info_ytdlp
+from utils.video_processing import get_direct_video_url, get_real_direct_video_url, get_video_url, get_video_info_ytdlp, is_m3u8_url
 from utils.helpers import run_yt_dlp, get_channel_thumbnail, get_proxy_url, get_video_proxy_url, get_cookies_files, select_random_cookie_file, get_api_key, get_api_key_rotated
 from utils.video_cache import (
     get_cache_path, is_video_cached, get_cached_video_size, should_cache_video,
@@ -142,8 +142,51 @@ def setup_video_routes(config):
             # If proxy=false, redirect to the original video URL
             if not use_proxy:
                 try:
-                    # Get the original video URL without proxying
-                    video_url = get_real_direct_video_url(video_id)
+                    # Если есть параметр quality, получаем URL с нужным качеством
+                    if quality:
+                        def parse_desired_height(qval):
+                            if not qval:
+                                return None
+                            s = str(qval).strip().lower()
+                            try:
+                                return int(s)
+                            except Exception:
+                                pass
+                            digits = ''.join(ch for ch in s if ch.isdigit())
+                            if digits:
+                                try:
+                                    return int(digits)
+                                except Exception:
+                                    pass
+                            aliases = {
+                                'tiny': 144, 'small': 240, 'medium': 360, 'large': 480,
+                                'hd': 720, 'hd720': 720, '720p': 720,
+                                'hd1080': 1080, '1080p': 1080,
+                                '144p': 144, '240p': 240, '360p': 360, '480p': 480,
+                                '2160p': 2160, '1440p': 1440
+                            }
+                            return aliases.get(s)
+                        
+                        desired_height = parse_desired_height(quality)
+                        if desired_height:
+                            quality_str = str(desired_height)
+                        else:
+                            quality_str = 'standard'
+                        
+                        # Получаем URL с нужным качеством
+                        video_url, audio_url = get_video_url(video_id, quality_str)
+                        # Используем video_url (комбинированный поток или отдельный видео поток)
+                        if not video_url:
+                            # Если не удалось получить URL, пробуем с другим cookie файлом
+                            cookies_files = get_cookies_files()
+                            for cookie_file in cookies_files:
+                                video_url, audio_url = get_video_url(video_id, quality_str, cookie_file)
+                                if video_url:
+                                    break
+                    else:
+                        # Если quality не указан, используем стандартный метод
+                        video_url = get_real_direct_video_url(video_id)
+                    
                     if video_url:
                         # Redirect to the original URL
                         return redirect(video_url)
@@ -351,155 +394,165 @@ def setup_video_routes(config):
                         video_url, audio_url = get_video_url(video_id, quality_str)
                         
                         # Если не удалось получить URL, пробуем с другим cookie файлом
-                        if not video_url and not audio_url:
+                        if not video_url:
                             # Попробуем все доступные cookie файлы
                             cookies_files = get_cookies_files()
                             for cookie_file in cookies_files:
                                 video_url, audio_url = get_video_url(video_id, quality_str, cookie_file)
-                                if video_url or audio_url:
+                                if video_url:
                                     break
                         
-                        # Если получили отдельные потоки видео и аудио, используем FFmpeg для объединения
-                        if video_url and audio_url:
-                            # Комбинируем потоки через FFmpeg
-                            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36'
-                            common_headers = 'Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com'
-                            ffmpeg_cmd = [
-                                'ffmpeg',
-                                '-hide_banner',
-                                '-loglevel', 'error',
-                                '-nostdin',
-                                '-reconnect', '1',
-                                '-reconnect_streamed', '1',
-                                '-reconnect_at_eof', '1',
-                                '-reconnect_delay_max', '10',
-                                '-user_agent', user_agent,
-                                '-headers', common_headers,
-                                '-i', video_url,
-                                '-user_agent', user_agent,
-                                '-headers', common_headers,
-                                '-i', audio_url,
-                                '-map', '0:v:0',
-                                '-map', '1:a:0',
-                                '-c:v', 'copy',
-                                '-c:a', 'aac',
-                                '-b:a', '160k',
-                                '-movflags', 'frag_keyframe+empty_moov',
-                                '-f', 'mp4',
-                                '-'
-                            ]
+                        # Получаем комбинированный поток (video_url, audio_url = None)
+                        if video_url:
+                            # Если это m3u8 и есть параметр quality, конвертируем в MP4 через FFmpeg
+                            if is_m3u8_url(video_url) and quality:
+                                user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36'
+                                common_headers = 'Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com'
+                                ffmpeg_cmd = [
+                                    'ffmpeg',
+                                    '-hide_banner',
+                                    '-loglevel', 'error',
+                                    '-nostdin',
+                                    '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+                                    '-reconnect', '1',
+                                    '-reconnect_streamed', '1',
+                                    '-reconnect_at_eof', '1',
+                                    '-reconnect_delay_max', '10',
+                                    '-user_agent', user_agent,
+                                    '-headers', common_headers,
+                                    '-i', video_url,
+                                    '-c:v', 'copy',
+                                    '-c:a', 'aac',
+                                    '-b:a', '192k',
+                                    '-bsf:a', 'aac_adtstoasc',
+                                    '-fflags', '+genpts',
+                                    '-avoid_negative_ts', 'make_zero',
+                                    '-movflags', 'frag_keyframe+empty_moov+default_base_moof+faststart',
+                                    '-f', 'mp4',
+                                    '-'
+                                ]
 
-                            ffmpeg_process = subprocess.Popen(
-                                ffmpeg_cmd,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                bufsize=0
-                            )
+                                ffmpeg_process = subprocess.Popen(
+                                    ffmpeg_cmd,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    bufsize=0
+                                )
 
-                            def _drain_stderr():
+                                def _drain_stderr_m3u8():
+                                    try:
+                                        if ffmpeg_process and ffmpeg_process.stderr:
+                                            while True:
+                                                line = ffmpeg_process.stderr.readline()
+                                                if not line:
+                                                    break
+                                                # Логируем ошибки для отладки
+                                                if line:
+                                                    print(f"FFmpeg stderr: {line.decode('utf-8', errors='ignore').strip()}")
+                                    except Exception:
+                                        pass
                                 try:
-                                    if ffmpeg_process and ffmpeg_process.stderr:
-                                        while True:
-                                            line = ffmpeg_process.stderr.readline()
-                                            if not line:
-                                                break
-                                except Exception:
-                                    pass
-                            try:
-                                threading.Thread(target=_drain_stderr, daemon=True).start()
-                            except Exception as e:
-                                print(f"Error starting stderr drain thread: {e}")
+                                    threading.Thread(target=_drain_stderr_m3u8, daemon=True).start()
+                                except Exception as e:
+                                    print(f"Error starting stderr drain thread: {e}")
 
-                            def generate_and_cache_ffmpeg():
-                                try:
-                                    if cache_path:
-                                        # Ensure directory exists
-                                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                                        with open(cache_path, 'wb') as cache_file:
+                                def generate_and_cache_m3u8():
+                                    try:
+                                        if cache_path:
+                                            # Ensure directory exists
+                                            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                                            with open(cache_path, 'wb') as cache_file:
+                                                if ffmpeg_process and ffmpeg_process.stdout:
+                                                    while True:
+                                                        chunk = ffmpeg_process.stdout.read(65536)
+                                                        if not chunk:
+                                                            # Проверяем, завершился ли процесс
+                                                            if ffmpeg_process.poll() is not None:
+                                                                break
+                                                            continue
+                                                        cache_file.write(chunk)
+                                                        yield chunk
+                                        else:
                                             if ffmpeg_process and ffmpeg_process.stdout:
                                                 while True:
                                                     chunk = ffmpeg_process.stdout.read(65536)
                                                     if not chunk:
-                                                        break
-                                                    cache_file.write(chunk)
+                                                        # Проверяем, завершился ли процесс
+                                                        if ffmpeg_process.poll() is not None:
+                                                            break
+                                                        continue
                                                     yield chunk
-                                    else:
-                                        if ffmpeg_process and ffmpeg_process.stdout:
-                                            while True:
-                                                chunk = ffmpeg_process.stdout.read(65536)
-                                                if not chunk:
-                                                    break
-                                                yield chunk
-                                except Exception as e:
-                                    print(f"Error in generate_and_cache_ffmpeg: {e}")
-                                finally:
-                                    try:
-                                        if ffmpeg_process:
-                                            ffmpeg_process.terminate()
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        print(f"Error in generate_and_cache_m3u8: {e}")
+                                    finally:
+                                        try:
+                                            if ffmpeg_process:
+                                                ffmpeg_process.terminate()
+                                                ffmpeg_process.wait(timeout=5)
+                                        except Exception:
+                                            pass
 
-                            response = Response(generate_and_cache_ffmpeg(), mimetype='video/mp4')
-                            response.headers['Content-Type'] = 'video/mp4'
-                            if duration_value:
-                                duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
-                                response.headers['X-Content-Duration'] = duration_str
-                                response.headers['Content-Duration'] = duration_str
-                                response.headers['X-Video-Duration'] = duration_str
-                                response.headers['X-Duration-Seconds'] = duration_str
-                            
-                            # Check and cleanup cache if needed
-                            check_and_cleanup_cache(
-                                config.get('temp_folder_max_size_mb', 5120),
-                                config.get('cache_cleanup_threshold_mb', 100)
-                            )
-                            
-                            return response
-                        # Если получили комбинированный поток (только video_url, audio_url = None)
-                        elif video_url and not audio_url:
-                            # For combined streams, we can directly proxy without FFmpeg processing
-                            headers = {
-                                'Range': request.headers.get('Range', 'bytes=0-'),
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                            }
-                            resp = requests.get(video_url, headers=headers, stream=True, timeout=config['request_timeout'])
-                            
-                            def generate_and_cache_combined():
-                                try:
-                                    if cache_path:
-                                        # Ensure directory exists
-                                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                                        with open(cache_path, 'wb') as cache_file:
+                                response = Response(generate_and_cache_m3u8(), mimetype='video/mp4')
+                                response.headers['Content-Type'] = 'video/mp4'
+                                response.headers['Accept-Ranges'] = 'bytes'
+                                if duration_value:
+                                    duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
+                                    response.headers['X-Content-Duration'] = duration_str
+                                    response.headers['Content-Duration'] = duration_str
+                                    response.headers['X-Video-Duration'] = duration_str
+                                    response.headers['X-Duration-Seconds'] = duration_str
+                                
+                                # Check and cleanup cache if needed
+                                check_and_cleanup_cache(
+                                    config.get('temp_folder_max_size_mb', 5120),
+                                    config.get('cache_cleanup_threshold_mb', 100)
+                                )
+                                
+                                return response
+                            else:
+                                # For combined streams, we can directly proxy without FFmpeg processing
+                                headers = {
+                                    'Range': request.headers.get('Range', 'bytes=0-'),
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                                }
+                                resp = requests.get(video_url, headers=headers, stream=True, timeout=config['request_timeout'])
+                                
+                                def generate_and_cache_combined():
+                                    try:
+                                        if cache_path:
+                                            # Ensure directory exists
+                                            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                                            with open(cache_path, 'wb') as cache_file:
+                                                for chunk in resp.iter_content(chunk_size=8192):
+                                                    if chunk:
+                                                        cache_file.write(chunk)
+                                                        yield chunk
+                                        else:
                                             for chunk in resp.iter_content(chunk_size=8192):
                                                 if chunk:
-                                                    cache_file.write(chunk)
                                                     yield chunk
-                                    else:
-                                        for chunk in resp.iter_content(chunk_size=8192):
-                                            if chunk:
-                                                yield chunk
-                                finally:
-                                    pass
-                            
-                            response = Response(generate_and_cache_combined() if cache_path else resp.iter_content(chunk_size=8192), status=resp.status_code, mimetype='video/mp4')
-                            response.headers['Accept-Ranges'] = 'bytes'
-                            response.headers['Content-Type'] = 'video/mp4'
-                            if 'content-range' in resp.headers:
-                                response.headers['Content-Range'] = resp.headers['content-range']
-                            if duration_value:
-                                duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
-                                response.headers['X-Content-Duration'] = duration_str
-                                response.headers['Content-Duration'] = duration_str
-                                response.headers['X-Video-Duration'] = duration_str
-                                response.headers['X-Duration-Seconds'] = duration_str
-                            
-                            # Check and cleanup cache if needed
-                            check_and_cleanup_cache(
-                                config.get('temp_folder_max_size_mb', 5120),
-                                config.get('cache_cleanup_threshold_mb', 100)
-                            )
-                            
-                            return response
+                                    finally:
+                                        pass
+                                
+                                response = Response(generate_and_cache_combined() if cache_path else resp.iter_content(chunk_size=8192), status=resp.status_code, mimetype='video/mp4')
+                                response.headers['Accept-Ranges'] = 'bytes'
+                                response.headers['Content-Type'] = 'video/mp4'
+                                if 'content-range' in resp.headers:
+                                    response.headers['Content-Range'] = resp.headers['content-range']
+                                if duration_value:
+                                    duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
+                                    response.headers['X-Content-Duration'] = duration_str
+                                    response.headers['Content-Duration'] = duration_str
+                                    response.headers['X-Video-Duration'] = duration_str
+                                    response.headers['X-Duration-Seconds'] = duration_str
+                                
+                                # Check and cleanup cache if needed
+                                check_and_cleanup_cache(
+                                    config.get('temp_folder_max_size_mb', 5120),
+                                    config.get('cache_cleanup_threshold_mb', 100)
+                                )
+                                
+                                return response
                         
                         # Если не удалось получить URL
                         else:
@@ -626,6 +679,7 @@ def setup_video_routes(config):
                     # Если получили комбинированный поток (только video_url, audio_url = None)
                     elif video_url and not audio_url:
                         # For combined streams, we can directly proxy without FFmpeg processing
+                        # (m3u8 конвертация происходит только когда есть параметр quality)
                         headers = {
                             'Range': request.headers.get('Range', 'bytes=0-'),
                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -820,139 +874,148 @@ def setup_video_routes(config):
                         video_url, audio_url = get_video_url(video_id, quality_str)
                         
                         # Если не удалось получить URL, пробуем с другим cookie файлом
-                        if not video_url and not audio_url:
+                        if not video_url:
                             # Попробуем все доступные cookie файлы
                             cookies_files = get_cookies_files()
                             for cookie_file in cookies_files:
                                 video_url, audio_url = get_video_url(video_id, quality_str, cookie_file)
-                                if video_url or audio_url:
+                                if video_url:
                                     break
                         
-                        # Если получили отдельные потоки видео и аудио, используем FFmpeg для объединения
-                        if video_url and audio_url:
-                            # Комбинируем потоки через FFmpeg
-                            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36'
-                            common_headers = 'Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com'
-                            ffmpeg_cmd = [
-                                'ffmpeg',
-                                '-hide_banner',
-                                '-loglevel', 'error',
-                                '-nostdin',
-                                '-reconnect', '1',
-                                '-reconnect_streamed', '1',
-                                '-reconnect_at_eof', '1',
-                                '-reconnect_delay_max', '10',
-                                '-user_agent', user_agent,
-                                '-headers', common_headers,
-                                '-i', video_url,
-                                '-user_agent', user_agent,
-                                '-headers', common_headers,
-                                '-i', audio_url,
-                                '-map', '0:v:0',
-                                '-map', '1:a:0',
-                                '-c:v', 'copy',
-                                '-c:a', 'aac',
-                                '-b:a', '160k',
-                                '-movflags', 'frag_keyframe+empty_moov',
-                                '-f', 'mp4',
-                                '-'
-                            ]
+                        # Получаем комбинированный поток (video_url, audio_url = None)
+                        if video_url:
+                            # Если это m3u8 и есть параметр quality, конвертируем в MP4 через FFmpeg
+                            if is_m3u8_url(video_url) and quality:
+                                user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36'
+                                common_headers = 'Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com'
+                                ffmpeg_cmd = [
+                                    'ffmpeg',
+                                    '-hide_banner',
+                                    '-loglevel', 'error',
+                                    '-nostdin',
+                                    '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+                                    '-reconnect', '1',
+                                    '-reconnect_streamed', '1',
+                                    '-reconnect_at_eof', '1',
+                                    '-reconnect_delay_max', '10',
+                                    '-user_agent', user_agent,
+                                    '-headers', common_headers,
+                                    '-i', video_url,
+                                    '-c:v', 'copy',
+                                    '-c:a', 'aac',
+                                    '-b:a', '192k',
+                                    '-bsf:a', 'aac_adtstoasc',
+                                    '-fflags', '+genpts',
+                                    '-avoid_negative_ts', 'make_zero',
+                                    '-movflags', 'frag_keyframe+empty_moov+default_base_moof+faststart',
+                                    '-f', 'mp4',
+                                    '-'
+                                ]
 
-                            ffmpeg_process = subprocess.Popen(
-                                ffmpeg_cmd,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                bufsize=0
-                            )
+                                ffmpeg_process = subprocess.Popen(
+                                    ffmpeg_cmd,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    bufsize=0
+                                )
 
-                            def _drain_stderr():
+                                def _drain_stderr_m3u8_download():
+                                    try:
+                                        if ffmpeg_process and ffmpeg_process.stderr:
+                                            while True:
+                                                line = ffmpeg_process.stderr.readline()
+                                                if not line:
+                                                    break
+                                                # Логируем ошибки для отладки
+                                                if line:
+                                                    print(f"FFmpeg stderr (download): {line.decode('utf-8', errors='ignore').strip()}")
+                                    except Exception:
+                                        pass
                                 try:
-                                    if ffmpeg_process and ffmpeg_process.stderr:
-                                        while True:
-                                            line = ffmpeg_process.stderr.readline()
-                                            if not line:
-                                                break
-                                except Exception:
-                                    pass
-                            try:
-                                threading.Thread(target=_drain_stderr, daemon=True).start()
-                            except Exception as e:
-                                print(f"Error starting stderr drain thread: {e}")
+                                    threading.Thread(target=_drain_stderr_m3u8_download, daemon=True).start()
+                                except Exception as e:
+                                    print(f"Error starting stderr drain thread: {e}")
 
-                            def generate_and_cache_ffmpeg_download():
-                                try:
-                                    if cache_path:
-                                        # Ensure directory exists
-                                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                                        with open(cache_path, 'wb') as cache_file:
+                                def generate_and_cache_m3u8_download():
+                                    try:
+                                        if cache_path:
+                                            # Ensure directory exists
+                                            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                                            with open(cache_path, 'wb') as cache_file:
+                                                if ffmpeg_process and ffmpeg_process.stdout:
+                                                    while True:
+                                                        chunk = ffmpeg_process.stdout.read(65536)
+                                                        if not chunk:
+                                                            # Проверяем, завершился ли процесс
+                                                            if ffmpeg_process.poll() is not None:
+                                                                break
+                                                            continue
+                                                        cache_file.write(chunk)
+                                                        yield chunk
+                                        else:
                                             if ffmpeg_process and ffmpeg_process.stdout:
                                                 while True:
                                                     chunk = ffmpeg_process.stdout.read(65536)
                                                     if not chunk:
-                                                        break
-                                                    cache_file.write(chunk)
+                                                        # Проверяем, завершился ли процесс
+                                                        if ffmpeg_process.poll() is not None:
+                                                            break
+                                                        continue
                                                     yield chunk
-                                    else:
-                                        if ffmpeg_process and ffmpeg_process.stdout:
-                                            while True:
-                                                chunk = ffmpeg_process.stdout.read(65536)
-                                                if not chunk:
-                                                    break
-                                                yield chunk
-                                except Exception as e:
-                                    print(f"Error in generate_and_cache_ffmpeg_download: {e}")
-                                finally:
-                                    try:
-                                        if ffmpeg_process:
-                                            ffmpeg_process.terminate()
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        print(f"Error in generate_and_cache_m3u8_download: {e}")
+                                    finally:
+                                        try:
+                                            if ffmpeg_process:
+                                                ffmpeg_process.terminate()
+                                                ffmpeg_process.wait(timeout=5)
+                                        except Exception:
+                                            pass
 
-                            response = Response(generate_and_cache_ffmpeg_download(), mimetype='video/mp4')
-                            response.headers['Content-Disposition'] = f'attachment; filename="{video_title}.mp4"'
-                            
-                            # Check and cleanup cache if needed
-                            check_and_cleanup_cache(
-                                config.get('temp_folder_max_size_mb', 5120),
-                                config.get('cache_cleanup_threshold_mb', 100)
-                            )
-                            
-                            return response
-                        # Если получили комбинированный поток (только video_url, audio_url = None)
-                        elif video_url and not audio_url:
-                            # For combined streams, we can directly proxy without FFmpeg processing
-                            headers = {
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                            }
-                            resp = requests.get(video_url, headers=headers, stream=True, timeout=config['request_timeout'])
-                            
-                            def generate_and_cache_combined_download():
-                                try:
-                                    if cache_path:
-                                        # Ensure directory exists
-                                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                                        with open(cache_path, 'wb') as cache_file:
+                                response = Response(generate_and_cache_m3u8_download(), mimetype='video/mp4')
+                                response.headers['Content-Disposition'] = f'attachment; filename="{video_title}.mp4"'
+                                
+                                # Check and cleanup cache if needed
+                                check_and_cleanup_cache(
+                                    config.get('temp_folder_max_size_mb', 5120),
+                                    config.get('cache_cleanup_threshold_mb', 100)
+                                )
+                                
+                                return response
+                            else:
+                                # For combined streams, we can directly proxy without FFmpeg processing
+                                headers = {
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                                }
+                                resp = requests.get(video_url, headers=headers, stream=True, timeout=config['request_timeout'])
+                                
+                                def generate_and_cache_combined_download():
+                                    try:
+                                        if cache_path:
+                                            # Ensure directory exists
+                                            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                                            with open(cache_path, 'wb') as cache_file:
+                                                for chunk in resp.iter_content(chunk_size=8192):
+                                                    if chunk:
+                                                        cache_file.write(chunk)
+                                                        yield chunk
+                                        else:
                                             for chunk in resp.iter_content(chunk_size=8192):
                                                 if chunk:
-                                                    cache_file.write(chunk)
                                                     yield chunk
-                                    else:
-                                        for chunk in resp.iter_content(chunk_size=8192):
-                                            if chunk:
-                                                yield chunk
-                                finally:
-                                    pass
-                            
-                            response = Response(generate_and_cache_combined_download() if cache_path else resp.iter_content(chunk_size=8192), mimetype='video/mp4')
-                            response.headers['Content-Disposition'] = f'attachment; filename="{video_title}.mp4"'
-                            
-                            # Check and cleanup cache if needed
-                            check_and_cleanup_cache(
-                                config.get('temp_folder_max_size_mb', 5120),
-                                config.get('cache_cleanup_threshold_mb', 100)
-                            )
-                            
-                            return response
+                                    finally:
+                                        pass
+                                
+                                response = Response(generate_and_cache_combined_download() if cache_path else resp.iter_content(chunk_size=8192), mimetype='video/mp4')
+                                response.headers['Content-Disposition'] = f'attachment; filename="{video_title}.mp4"'
+                                
+                                # Check and cleanup cache if needed
+                                check_and_cleanup_cache(
+                                    config.get('temp_folder_max_size_mb', 5120),
+                                    config.get('cache_cleanup_threshold_mb', 100)
+                                )
+                                
+                                return response
                         
                         # Если не удалось получить URL
                         else:
@@ -1069,6 +1132,7 @@ def setup_video_routes(config):
                     # Если получили комбинированный поток (только video_url, audio_url = None)
                     elif video_url and not audio_url:
                         # For combined streams, we can directly proxy without FFmpeg processing
+                        # (m3u8 конвертация происходит только когда есть параметр quality)
                         headers = {
                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                         }

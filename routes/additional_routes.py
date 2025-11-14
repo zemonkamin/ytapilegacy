@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, redirect
 import json
 import requests
 import subprocess
@@ -8,7 +8,7 @@ from urllib.parse import quote
 from utils.video_processing import get_direct_video_url, get_real_direct_video_url, get_video_url
 from utils.helpers import (
     run_yt_dlp, get_channel_thumbnail, get_proxy_url, get_video_proxy_url,
-    get_api_key, get_api_key_rotated, get_available_formats
+    get_api_key, get_api_key_rotated, get_available_formats, get_cookies_files
 )
 from utils.auth import refresh_access_token
 import string
@@ -42,85 +42,99 @@ def setup_additional_routes(config):
     def direct_audio_url():
         try:
             video_id = request.args.get('video_id')
+            proxy_param = request.args.get('proxy', 'true').lower()
+            use_proxy = proxy_param != 'false'
+            
             if not video_id:
-                return jsonify({'error': 'ID видео не был передан.'}), 400
+                response = jsonify({'error': 'ID видео не был передан.'})
+                response.status_code = 400
+                response.headers['Content-Length'] = str(len(response.get_data()))
+                return response
 
+            # Получаем аудио URL используя bestaudio формат
+            url = f'https://www.youtube.com/watch?v={video_id}'
+            audio_url = run_yt_dlp(['-f', 'bestaudio', '--get-url', url])
+            
+            # Если не удалось получить URL, пробуем с другим cookie файлом
+            if not audio_url:
+                cookies_files = get_cookies_files()
+                for cookie_file in cookies_files:
+                    audio_url = run_yt_dlp(['-f', 'bestaudio', '--get-url', url], cookie_file)
+                    if audio_url:
+                        break
+            
+            if not audio_url:
+                response = jsonify({'error': 'Не удалось получить ссылку на аудио поток.'})
+                response.status_code = 500
+                response.headers['Content-Length'] = str(len(response.get_data()))
+                return response
+
+            # Если proxy=false, перенаправляем на прямую ссылку
+            if not use_proxy:
+                return redirect(audio_url)
+
+            # Получаем информацию о длительности видео
             duration_value = None
             try:
-                url = f'https://www.youtube.com/watch?v={video_id}'
                 info_output = run_yt_dlp(['--dump-json', '--no-warnings', url])
+                
                 if info_output:
-                    info = json.loads(info_output)
-                    duration_value = info.get('duration')
+                    try:
+                        info = json.loads(info_output)
+                        duration_value = info.get('duration')
+                    except json.JSONDecodeError as e:
+                        print(f"Error parsing JSON for duration: {e}")
             except Exception as e:
                 print(f"Error fetching duration for video_id {video_id}: {e}")
 
-            try:
-                formats = get_available_formats(video_id)
-                if not formats:
-                    return jsonify({'error': 'Не удалось получить информацию о форматах.'}), 500
-
-                audio_formats = [
-                    f for f in formats
-                    if f.get('vcodec') == 'none' and
-                       f.get('acodec') != 'none' and
-                       f.get('protocol', '').startswith('https') and
-                       '[en]' in f.get('format', '')
-                ]
-                if not audio_formats:
-                    audio_formats = [
-                        f for f in formats
-                        if f.get('vcodec') == 'none' and
-                           f.get('acodec') != 'none' and
-                           f.get('protocol', '').startswith('https')
-                    ]
-                if not audio_formats:
-                    return jsonify({'error': 'Не удалось подобрать аудио поток.'}), 500
-
-                best_audio = max(audio_formats, key=lambda f: f.get('tbr', 0))
-                format_id = best_audio['format_id']
-                print(f"[DEBUG] Выбран формат аудио: ID={format_id}, tbr={best_audio.get('tbr', 'N/A')}")
-
-                url = f'https://www.youtube.com/watch?v={video_id}'
-                audio_url = run_yt_dlp(['-f', format_id, '--get-url', url])
-                if not audio_url:
-                    return jsonify({'error': 'Не удалось получить ссылку на аудио поток.'}), 500
-
-                headers = {
-                    'Range': request.headers.get('Range', 'bytes=0-'),
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-                resp = requests.get(audio_url, headers=headers, stream=True, timeout=config['request_timeout'])
-
-                def generate():
-                    try:
-                        for chunk in resp.iter_content(chunk_size=8192):
-                            if chunk:
-                                yield chunk
-                    finally:
-                        resp.close()
-
-                response = Response(
-                    None if request.method == 'HEAD' else generate(),
-                    status=resp.status_code,
-                    mimetype='audio/m4a'
-                )
-                response.headers['Content-Type'] = resp.headers.get('content-type', 'audio/m4a')
-                response.headers['Content-Length'] = resp.headers.get('content-length', '')
-                response.headers['Accept-Ranges'] = 'bytes'
-                if 'content-range' in resp.headers:
-                    response.headers['Content-Range'] = resp.headers['content-range']
+            # Обработка HEAD запроса
+            if request.method == 'HEAD':
+                response = Response(None, mimetype='audio/m4a')
                 if duration_value:
                     duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
-                    for header in ['X-Content-Duration', 'Content-Duration', 'X-Video-Duration', 'X-Duration-Seconds']:
-                        response.headers[header] = duration_str
+                    response.headers['X-Content-Duration'] = duration_str
+                    response.headers['Content-Duration'] = duration_str
+                    response.headers['X-Video-Duration'] = duration_str
+                    response.headers['X-Duration-Seconds'] = duration_str
+                response.headers['Accept-Ranges'] = 'bytes'
+                response.headers['Content-Type'] = 'audio/m4a'
                 return response
-            except Exception as e:
-                print('Error in direct_audio_url:', e)
-                return jsonify({'error': 'Internal server error'}), 500
+
+            # Проксируем аудио поток
+            headers = {
+                'Range': request.headers.get('Range', 'bytes=0-'),
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            resp = requests.get(audio_url, headers=headers, stream=True, timeout=config['request_timeout'])
+            
+            def generate():
+                try:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            yield chunk
+                finally:
+                    pass
+            
+            response = Response(generate(), status=resp.status_code, mimetype='audio/m4a')
+            response.headers['Accept-Ranges'] = 'bytes'
+            response.headers['Content-Type'] = resp.headers.get('content-type', 'audio/m4a')
+            if 'content-length' in resp.headers:
+                response.headers['Content-Length'] = resp.headers['content-length']
+            if 'content-range' in resp.headers:
+                response.headers['Content-Range'] = resp.headers['content-range']
+            if duration_value:
+                duration_str = str(int(duration_value)) if isinstance(duration_value, (int, float)) else str(duration_value)
+                response.headers['X-Content-Duration'] = duration_str
+                response.headers['Content-Duration'] = duration_str
+                response.headers['X-Video-Duration'] = duration_str
+                response.headers['X-Duration-Seconds'] = duration_str
+            return response
         except Exception as e:
-            print('Error in direct_audio_url:', e)
-            return jsonify({'error': 'Internal server error'}), 500
+            print(f'Error in direct_audio_url: {e}')
+            response = jsonify({'error': f'Internal server error: {str(e)}'})
+            response.status_code = 500
+            response.headers['Content-Length'] = str(len(response.get_data()))
+            return response
 
     @additional_bp.route('/get_subscriptions.php', methods=['GET'])
     def get_default_subscriptions():
