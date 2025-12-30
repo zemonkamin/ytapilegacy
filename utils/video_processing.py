@@ -97,23 +97,75 @@ def get_standard_quality_url(video_id, cookie_file=None):
         return video_url, None
 
 def get_specific_quality_url(video_id, resolution, cookie_file=None):
-    """Получает прямую ссылку на комбинированный поток (видео+аудио) для выбранного разрешения через формат-селектор yt-dlp."""
+    """Получает прямую ссылку на видео и аудио для выбранного разрешения."""
+    formats = get_available_formats(video_id, cookie_file)
+    if not formats:
+        return None, None
+    
     url = f'https://www.youtube.com/watch?v={video_id}'
     height = int(resolution)
     
-    # Используем формат-селектор для получения комбинированного потока с нужным качеством
-    # Формат: [height=качество][vcodec!=none][acodec!=none] - выбирает формат с нужной высотой, где есть и видео и аудио
-    format_selector = f'[height={height}][vcodec!=none][acodec!=none]'
+    # Находим видео-формат с нужным разрешением (видео only, без аудио)
+    matching_formats = [
+        f for f in formats 
+        if f.get('height') == height and 
+        f.get('vcodec') != 'none' and 
+        f.get('acodec') == 'none' and 
+        f.get('protocol', '').startswith('https')
+    ]
     
-    print(f"[DEBUG] Получение комбинированного потока {height}p через формат-селектор: {format_selector}")
-    video_url = run_yt_dlp(['--get-url', '-f', format_selector, url], cookie_file)
-    
-    if video_url:
-        print(f"[DEBUG] Получен комбинированный поток {height}p")
-        return video_url, None  # Возвращаем комбинированный поток (audio_url = None)
+    video_url = None
+    if matching_formats:
+        best_format = max(matching_formats, key=lambda f: f.get('tbr', 0))
+        format_id = best_format['format_id']
+        print(f"[DEBUG] Выбран формат видео: ID={format_id}, {resolution}p, tbr={best_format.get('tbr', 'N/A')}")
+        video_url = run_yt_dlp(['-f', format_id, '--get-url', url], cookie_file)
     else:
-        print(f"[DEBUG] Комбинированный поток {height}p не найден через формат-селектор")
-        return None, None
+        print(f"[DEBUG] Формат {resolution}p не найден")
+    
+    # Находим аудио-формат (предпочитаем английскую дорожку)
+    audio_formats = [
+        f for f in formats 
+        if f.get('vcodec') == 'none' and 
+        f.get('acodec') != 'none' and 
+        f.get('protocol', '').startswith('https') and 
+        '[en]' in f.get('format', '')
+    ]
+    if not audio_formats:
+        audio_formats = [
+            f for f in formats 
+            if f.get('vcodec') == 'none' and 
+            f.get('acodec') != 'none' and 
+            f.get('protocol', '').startswith('https')
+        ]
+    
+    audio_url = None
+    if audio_formats:
+        best_audio = max(audio_formats, key=lambda f: f.get('tbr', 0))
+        format_id = best_audio['format_id']
+        print(f"[DEBUG] Выбран формат аудио: ID={format_id}, tbr={best_audio.get('tbr', 'N/A')}")
+        audio_url = run_yt_dlp(['-f', format_id, '--get-url', url], cookie_file)
+    
+    # If we couldn't get separate streams, try to get a combined stream
+    if not video_url or not audio_url:
+        print("[DEBUG] Не удалось получить отдельные потоки, пробуем комбинированный поток")
+        combined_formats = [
+            f for f in formats 
+            if f.get('vcodec') != 'none' and 
+            f.get('acodec') != 'none' and 
+            f.get('protocol', '').startswith('https') and
+            f.get('height', 0) <= height
+        ]
+        
+        if combined_formats:
+            # Sort by quality (height) in descending order but limit to requested height
+            best_combined = max(combined_formats, key=lambda f: f.get('height', 0))
+            format_id = best_combined['format_id']
+            print(f"[DEBUG] Найден комбинированный поток: {best_combined.get('height', 'N/A')}p, ID={format_id}")
+            video_url = run_yt_dlp(['-f', format_id, '--get-url', url], cookie_file)
+            audio_url = None  # Combined stream contains both video and audio
+    
+    return video_url, audio_url
 
 def get_video_url(video_id, quality_choice, cookie_file=None):
     """Основная функция для получения URL в зависимости от выбора качества."""
@@ -121,13 +173,6 @@ def get_video_url(video_id, quality_choice, cookie_file=None):
         return get_standard_quality_url(video_id, cookie_file)
     else:
         return get_specific_quality_url(video_id, quality_choice, cookie_file)
-
-def is_m3u8_url(url):
-    """Проверяет, является ли URL m3u8 (HLS поток)."""
-    if not url:
-        return False
-    url_lower = url.lower()
-    return '.m3u8' in url_lower or 'manifest/hls_playlist' in url_lower or 'hls_playlist' in url_lower
 
 def get_video_info_ytdlp(video_id, cookie_file=None):
     """Получает информацию о видео через yt-dlp."""
