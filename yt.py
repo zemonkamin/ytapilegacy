@@ -1,6 +1,6 @@
 import os
 import json
-from flask import Flask, session
+from flask import Flask, session, jsonify
 from flask_cors import CORS
 from flask_session import Session
 
@@ -12,11 +12,11 @@ def create_app():
     app = Flask(__name__)
     app.secret_key = config.get('secretkey', 'default_secret_key_for_sessions')
     CORS(app)
-    
+   
     # Session configuration
     app.config['SESSION_TYPE'] = 'filesystem'
     app.config['SECRET_KEY'] = config.get('secretkey', 'default_secret_key_for_sessions')
-    
+   
     # Initialize session
     Session(app)
 
@@ -39,7 +39,7 @@ def create_app():
             'https://www.googleapis.com/auth/userinfo.email'
         ]
     )
-    
+   
     setup_video_routes(config)
     setup_search_routes(config)
     setup_channel_routes(config)
@@ -51,6 +51,24 @@ def create_app():
     app.register_blueprint(search_bp)
     app.register_blueprint(channel_bp)
     app.register_blueprint(additional_bp)
+
+
+    @app.route('/get-instants')
+    def get_instants():
+        instants_data = {
+            "instants": [
+                {
+                    "url": "https://yt.legacyprojects.ru"
+                },
+                {
+                    "url": "https://yt.modyleprojects.ru"
+                },
+                {
+                    "url": "https://ytcloud.meetlook.ru"
+                }
+            ]
+        }
+        return jsonify(instants_data)
 
     # Home route
     @app.route('/')
@@ -211,6 +229,10 @@ def create_app():
                 <h3>Channel Icon</h3>
                 <p>/channel_icon/VIDEO_ID - Get channel icon for a video</p>
                 <p style="font-size: 0.8em; color: #aaa;">Example: /channel_icon/dQw4w9WgXcQ?apikey=YOUR_API_KEY</p>
+            </div>
+            <div class="endpoint">
+                <h3>Instances</h3>
+                <p>/get-instants - Список доступных инстансов (зеркал) API в формате JSON</p>
             </div>
             <div class="endpoint">
                 <h3>Download</h3>
