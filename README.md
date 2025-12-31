@@ -1,6 +1,6 @@
 <div align="center">
 <img src="icon.png" width=20% height=20%>
-<h1>YouTube API Legacy</h1>
+<h1>YouTube API Legacy Python CLOSED, <a href="https://github.com/ZendoMusic/yt-api-legacy">Current version in Rust</a></h1>
 </div>
 <a href="https://discord.gg/KUTcABsCrX">Discord</a>
 
